@@ -157,6 +157,14 @@ func ErrToStatus(err error) int {
 		return http.StatusMethodNotAllowed
 	case errors.Is(err, preview.ErrUnsupportedFormat):
 		return http.StatusUnsupportedMediaType
+	case errors.Is(err, preview.ErrPreviewHeaderInvalid):
+		return http.StatusUnsupportedMediaType
+	case errors.Is(err, preview.ErrPreviewOverBudget), errors.Is(err, preview.ErrPreviewDimensionsTooLarge):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, preview.ErrPreviewSourceChanged):
+		return http.StatusConflict
+	case errors.Is(err, preview.ErrPreviewSaturated), errors.Is(err, preview.ErrPreviewShuttingDown), errors.Is(err, preview.ErrPreviewUnavailable):
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}

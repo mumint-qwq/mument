@@ -256,3 +256,73 @@ execution during source publication preparation.
 - `.github/workflows/promote-dev-to-beta.yaml.disabled`
 - `.github/workflows/tag.yaml.disabled`
 - `.github/workflows/update-build-images.yaml.disabled`
+
+## 007-A/B development migration (2026-11-17)
+
+Additional changes relative to the initial mument snapshot are listed below.
+Source commits and validation are recorded in
+[007-A/B migration](docs/development/007-ab-migration.md). Added and modified Go
+files retain existing notices and identify the candidate source. No prior private
+history or candidate deployment tooling is included.
+
+| Status | File |
+| --- | --- |
+| Modified | `backend/cmd/root.go` |
+| Modified | `backend/internal/adapters/fs/diskcache/file_cache.go` |
+| Modified | `backend/internal/adapters/fs/diskcache/file_cache_test.go` |
+| Added | `backend/internal/database/sql/image_metadata.go` |
+| Added | `backend/internal/database/sql/image_metadata_test.go` |
+| Modified | `backend/internal/database/sql/index.go` |
+| Added | `backend/internal/database/sql/review_rc1_fix_test.go` |
+| Added | `backend/internal/imagemeta/orientation_result.go` |
+| Modified | `backend/internal/imagemeta/stub.go` |
+| Added | `backend/internal/imagemeta/tiff_header.go` |
+| Added | `backend/internal/imagemeta/tiff_header_test.go` |
+| Added | `backend/internal/preview/admission_test.go` |
+| Added | `backend/internal/preview/estimate.go` |
+| Added | `backend/internal/preview/estimate_test.go` |
+| Added | `backend/internal/preview/flight.go` |
+| Modified | `backend/internal/preview/heic_ffmpeg.go` |
+| Modified | `backend/internal/preview/image.go` |
+| Modified | `backend/internal/preview/image_test.go` |
+| Removed | `backend/internal/preview/memory_tracker.go` |
+| Added | `backend/internal/preview/observe.go` |
+| Modified | `backend/internal/preview/preview.go` |
+| Added | `backend/internal/preview/preview_admission_test.go` |
+| Added | `backend/internal/preview/queue.go` |
+| Added | `backend/internal/preview/resource_budget.go` |
+| Added | `backend/internal/preview/review_fix_test.go` |
+| Added | `backend/internal/preview/source.go` |
+| Modified | `backend/internal/web/http.go` |
+| Modified | `backend/internal/web/preview.go` |
+| Added | `backend/internal/web/preview_status_test.go` |
+| Added | `backend/pkg/indexing/directory_test_hook.go` |
+| Modified | `backend/pkg/indexing/getDirInfoCore_test.go` |
+| Modified | `backend/pkg/indexing/image_dimensions.go` |
+| Added | `backend/pkg/indexing/image_header.go` |
+| Added | `backend/pkg/indexing/image_metadata_contract_test.go` |
+| Added | `backend/pkg/indexing/image_metadata_integration_test.go` |
+| Added | `backend/pkg/indexing/image_metadata_policy_test.go` |
+| Added | `backend/pkg/indexing/image_metadata_scale_test.go` |
+| Added | `backend/pkg/indexing/image_metadata_security_test.go` |
+| Added | `backend/pkg/indexing/image_metadata_worker.go` |
+| Added | `backend/pkg/indexing/image_version_linux.go` |
+| Added | `backend/pkg/indexing/image_version_other.go` |
+| Modified | `backend/pkg/indexing/indexingFiles.go` |
+| Modified | `backend/pkg/indexing/indexingScanner.go` |
+| Modified | `backend/pkg/indexing/indexingSchedule.go` |
+| Modified | `backend/pkg/indexing/iteminfo/fileinfo.go` |
+| Added | `backend/pkg/indexing/iteminfo/image_meta.go` |
+| Modified | `backend/pkg/indexing/mutate.go` |
+| Added | `backend/pkg/indexing/review_r3_fix_test.go` |
+| Added | `backend/pkg/indexing/review_r3_tiff_path_test.go` |
+| Added | `backend/pkg/indexing/review_r4_fix_test.go` |
+| Added | `backend/pkg/indexing/review_r6_fix_test.go` |
+| Added | `backend/pkg/indexing/review_rc1_fix_test.go` |
+| Added | `backend/pkg/indexing/review_rc2_fix_test.go` |
+| Modified | `backend/pkg/settings/config.go` |
+| Added | `backend/pkg/settings/preview_budget_config_test.go` |
+| Modified | `backend/pkg/settings/structs.go` |
+| Modified | `frontend/public/config.generated.yaml` (budget example; adjacent notice retained) |
+
+Development workflow and migration status are documented in [docs/development](docs/development/README.md).

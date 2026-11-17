@@ -1,3 +1,5 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package diskcache
 
 import (
@@ -89,20 +91,55 @@ func migrateOldCacheStructure(oldDir, newDir string) error {
 	return nil
 }
 
+// Store publishes a cache value atomically: the bytes are written and synced to
+// a temporary file in the same directory, then renamed over the final name.
+// Readers therefore see either the previous complete value or the new complete
+// value, never a partially written preview. A failed write removes its own
+// temporary file and leaves any existing usable value untouched.
 func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 	mu := f.getScopedLocks(key)
 	mu.Lock()
 	defer mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	fileName := f.getFileName(key)
-	if err := os.MkdirAll(filepath.Dir(fileName), fileutils.PermDir); err != nil {
+	dir := filepath.Dir(fileName)
+	if err := os.MkdirAll(dir, fileutils.PermDir); err != nil {
 		return err
 	}
 
-	if err := os.WriteFile(fileName, value, fileutils.PermFile); err != nil {
+	tmp, err := os.CreateTemp(dir, ".preview-*")
+	if err != nil {
 		return err
 	}
-
+	tmpName := tmp.Name()
+	removeTemp := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+	if _, err := tmp.Write(value); err != nil {
+		removeTemp()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		removeTemp()
+		return err
+	}
+	if err := tmp.Chmod(fileutils.PermFile); err != nil {
+		removeTemp()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, fileName); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
 	return nil
 }
 

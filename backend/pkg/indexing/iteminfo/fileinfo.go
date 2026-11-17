@@ -18,6 +18,9 @@ type ItemInfo struct {
 	// Zero means that the index could not determine a ratio and clients should fall back.
 	DisplayAspectRatio float64 `json:"displayAspectRatio,omitempty"`
 	IsShared           bool    `json:"isShared,omitempty"` // whether the file or folder is shared
+	// Image is private versioned metadata for image entries. It is deliberately
+	// excluded from JSON so directory responses do not expose inode/dev/guard state.
+	Image *ImageIndexMeta `json:"-"`
 }
 
 // ExtendedItemInfo extends ItemInfo with optional metadata that's only populated on-demand

@@ -1,3 +1,5 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package preview
 
 import (
@@ -24,7 +26,7 @@ func (s *Service) convertHEICToJPEGWithFFmpeg(ctx context.Context, filePath stri
 
 	var quality string
 	switch previewSize {
-	case "large":
+	case "xlarge", "large":
 		quality = "2"
 	case "original":
 		quality = "1"
@@ -54,6 +56,9 @@ func (s *Service) convertImageWithFFmpeg(ctx context.Context, filePath string, p
 	var width, height int
 	var quality string
 	switch previewSize {
+	case "xlarge":
+		width, height = 1024, 1024
+		quality = "2"
 	case "large":
 		width, height = 640, 640
 		quality = "2"

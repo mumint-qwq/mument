@@ -40,6 +40,7 @@ type Scanner struct {
 	processedInodes map[uint64]struct{}  // Track inodes to detect hardlinks
 	foundHardLinks  map[string]uint64    // Path -> size for hardlinks found
 	batchItems      []*iteminfo.FileInfo // Accumulates items for bulk insert
+	imageCandidates []imageCandidate     // Bounded batch for header reads
 
 	idx *Index
 }
@@ -167,6 +168,7 @@ func (s *Scanner) runFullScanRoot() {
 	}
 
 	s.flushBatch()
+	s.flushImageCandidates()
 	s.purgeStaleEntries(true, false) // isRoot=true, isQuickScan=false
 	s.syncStatsWithDB()
 
@@ -219,6 +221,7 @@ func (s *Scanner) runQuickScanRoot() {
 	}
 
 	s.flushBatch()
+	s.flushImageCandidates()
 	s.purgeStaleEntries(true, true) // isRoot=true, isQuickScan=true
 	s.syncStatsWithDB()
 }
@@ -287,6 +290,7 @@ func (s *Scanner) runFullScanChild() {
 	}
 
 	s.flushBatch()
+	s.flushImageCandidates()
 	s.purgeStaleEntries(false, false) // isRoot=false, isQuickScan=false
 	s.syncStatsWithDB()
 
@@ -348,6 +352,7 @@ func (s *Scanner) runQuickScanChild() {
 	}
 
 	s.flushBatch()
+	s.flushImageCandidates()
 	s.purgeStaleEntries(false, true) // isRoot=false, isQuickScan=true
 	s.syncStatsWithDB()
 

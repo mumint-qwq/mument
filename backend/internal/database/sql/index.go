@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gtsteffaniak/filebrowser/backend/internal/database/sqlitebusy"
@@ -20,6 +21,13 @@ import (
 // It wraps the underlying sql.DB connection and provides type-safe methods.
 type IndexDB struct {
 	*TempDB
+	// imageObsSeq is seeded from MAX(image_obs_seq) so observations stay
+	// monotonic across a normal restart. It is intentionally per-database.
+	imageObsSeq atomic.Uint64
+	// imageBackfillPending is a schema migration request, distinct from a new
+	// or damaged file index. It asks scanners for one startup pass without
+	// discarding persisted complexity/schedule state.
+	imageBackfillPending bool
 }
 
 func createIndexDB(name string, journalMode string, lockingMode string, batchSize int, cacheSizeMB int, disableReuse bool) (*IndexDB, error) {
@@ -111,6 +119,14 @@ func NewIndexDB(name string, journalMode string, batchSize int, cacheSizeMB int,
 
 	requiresBackfill, err := idxDB.CreateIndexTable()
 	if err != nil {
+		idxDB.Close()
+		return nil, false, err
+	}
+	if err := idxDB.repairImageMetadata(); err != nil {
+		idxDB.Close()
+		return nil, false, err
+	}
+	if err := idxDB.seedImageObsSeq(); err != nil {
 		idxDB.Close()
 		return nil, false, err
 	}
@@ -259,6 +275,18 @@ func (db *IndexDB) CreateIndexTable() (bool, error) {
 		display_aspect_ratio REAL NOT NULL DEFAULT 0,
 		sort_name TEXT NOT NULL DEFAULT '',
 		last_updated INTEGER NOT NULL DEFAULT 0,
+		image_version TEXT NOT NULL DEFAULT '',
+		image_obs_seq INTEGER NOT NULL DEFAULT 0,
+		image_guard INTEGER NOT NULL DEFAULT 0,
+		image_state INTEGER NOT NULL DEFAULT 0,
+		image_width INTEGER NOT NULL DEFAULT 0,
+		image_height INTEGER NOT NULL DEFAULT 0,
+		image_orientation INTEGER NOT NULL DEFAULT 0,
+		image_parser_rev INTEGER NOT NULL DEFAULT 0,
+		image_retry_count INTEGER NOT NULL DEFAULT 0,
+		image_retry_at INTEGER NOT NULL DEFAULT 0,
+		image_size INTEGER NOT NULL DEFAULT 0,
+		image_mtime_ns INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (source, path)
 	);
 	`
@@ -298,6 +326,16 @@ func (db *IndexDB) CreateIndexTable() (bool, error) {
 	if _, err := db.Exec(indexQuery); err != nil {
 		return false, err
 	}
+	imageAdded, err := db.ensureImageMetadataColumns()
+	if err != nil {
+		return false, err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_image_backfill
+		ON index_items(source, image_state, image_retry_at)
+		WHERE is_dir = 0 AND image_version <> ''`); err != nil {
+		return false, err
+	}
+	db.imageBackfillPending = imageAdded
 	needsBackfill := aspectAdded || sortNameAdded
 	if !sortNameAdded {
 		missing, err := db.listingSortNameNeedsBackfill()
@@ -403,9 +441,10 @@ func (db *IndexDB) listingSortNameNeedsBackfill() (bool, error) {
 }
 
 func (db *IndexDB) InsertItem(source, path string, info *iteminfo.FileInfo) error {
+	imageValues, projection := db.imageInsertValues(info)
 	query := `
-	INSERT INTO index_items (source, path, parent_path, name, size, mod_time, type, is_dir, is_hidden, has_preview, display_aspect_ratio, sort_name, last_updated)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO index_items (source, path, parent_path, name, size, mod_time, type, is_dir, is_hidden, has_preview, display_aspect_ratio, sort_name, last_updated, ` + imageInsertColumnSQL + `)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ` + imageInsertPlaceholders + `)
 	ON CONFLICT(source, path) DO UPDATE SET
 		parent_path = excluded.parent_path,
 		name = excluded.name,
@@ -415,12 +454,11 @@ func (db *IndexDB) InsertItem(source, path string, info *iteminfo.FileInfo) erro
 		is_dir = excluded.is_dir,
 		is_hidden = excluded.is_hidden,
 		has_preview = excluded.has_preview,
-		display_aspect_ratio = excluded.display_aspect_ratio,
 		sort_name = excluded.sort_name,
-		last_updated = excluded.last_updated
+		last_updated = excluded.last_updated,` + imageUpsertSetSQL + `
 	`
 	parentPath := getParentPath(path)
-	_, err := db.Exec(query,
+	args := []interface{}{
 		source,
 		path,
 		parentPath,
@@ -431,10 +469,12 @@ func (db *IndexDB) InsertItem(source, path string, info *iteminfo.FileInfo) erro
 		info.Type == "directory",
 		info.Hidden,
 		info.HasPreview,
-		info.DisplayAspectRatio,
+		projection,
 		listingNameSortKey(info.Name),
 		time.Now().Unix(),
-	)
+	}
+	args = append(args, imageValues...)
+	_, err := db.Exec(query, args...)
 	if err != nil {
 		if !sqlitebusy.IsBusyOrLocked(err) {
 			logger.Errorf("InsertItem failed for source=%s path=%s: %v", source, path, err)
@@ -513,8 +553,8 @@ func (db *IndexDB) attemptBulkInsert(source string, items []*iteminfo.FileInfo) 
 	}()
 
 	stmt, err := tx.Prepare(`
-	INSERT INTO index_items (source, path, parent_path, name, size, mod_time, type, is_dir, is_hidden, has_preview, display_aspect_ratio, sort_name, last_updated)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO index_items (source, path, parent_path, name, size, mod_time, type, is_dir, is_hidden, has_preview, display_aspect_ratio, sort_name, last_updated, ` + imageInsertColumnSQL + `)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ` + imageInsertPlaceholders + `)
 	ON CONFLICT(source, path) DO UPDATE SET
 		parent_path = excluded.parent_path,
 		name = excluded.name,
@@ -524,9 +564,8 @@ func (db *IndexDB) attemptBulkInsert(source string, items []*iteminfo.FileInfo) 
 		is_dir = excluded.is_dir,
 		is_hidden = excluded.is_hidden,
 		has_preview = excluded.has_preview,
-		display_aspect_ratio = excluded.display_aspect_ratio,
 		sort_name = excluded.sort_name,
-		last_updated = excluded.last_updated
+		last_updated = excluded.last_updated,` + imageUpsertSetSQL + `
 	`)
 	if err != nil {
 		if sqlitebusy.IsBusyOrLocked(err) {
@@ -540,7 +579,8 @@ func (db *IndexDB) attemptBulkInsert(source string, items []*iteminfo.FileInfo) 
 	nowUnix := time.Now().Unix()
 	for _, info := range items {
 		parentPath := getParentPath(info.Path)
-		_, err := stmt.Exec(
+		imageValues, projection := db.imageInsertValues(info)
+		args := []interface{}{
 			source,
 			info.Path,
 			parentPath,
@@ -551,10 +591,12 @@ func (db *IndexDB) attemptBulkInsert(source string, items []*iteminfo.FileInfo) 
 			info.Type == "directory",
 			info.Hidden,
 			info.HasPreview,
-			info.DisplayAspectRatio,
+			projection,
 			listingNameSortKey(info.Name),
 			nowUnix,
-		)
+		}
+		args = append(args, imageValues...)
+		_, err := stmt.Exec(args...)
 		if err != nil {
 			if sqlitebusy.IsBusyOrLocked(err) {
 				logger.Debugf("[DB_TX] BulkInsertItems: Exec busy/locked during insert: %v", err)
@@ -633,7 +675,10 @@ func (db *IndexDB) GetItemsByPaths(source string, paths []string) (map[string]*i
 // GetDirectoryChildren retrieves all children of a directory for a specific source.
 func (db *IndexDB) GetDirectoryChildren(source, dirPath string) ([]*iteminfo.FileInfo, error) {
 	query := `
-	SELECT path, name, size, mod_time, type, is_dir, is_hidden, has_preview, display_aspect_ratio
+	SELECT path, name, size, mod_time, type, is_dir, is_hidden, has_preview, display_aspect_ratio,
+	       image_version, image_obs_seq, image_guard, image_state, image_width, image_height,
+	       image_orientation, image_parser_rev, image_retry_count, image_retry_at,
+	       image_size, image_mtime_ns
 	FROM index_items WHERE source = ? AND parent_path = ?
 	ORDER BY is_dir DESC, name ASC
 	`
@@ -651,7 +696,7 @@ func (db *IndexDB) GetDirectoryChildren(source, dirPath string) ([]*iteminfo.Fil
 
 	var children []*iteminfo.FileInfo
 	for rows.Next() {
-		item, err := scanRow(rows)
+		item, err := scanRowWithImage(rows)
 		if err != nil {
 			logger.Errorf("GetDirectoryChildren: scanRow failed, error=%v", err)
 			return nil, err

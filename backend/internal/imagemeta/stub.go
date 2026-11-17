@@ -5,8 +5,22 @@ package imagemeta
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 )
+
+// OrientationResult mirrors the full build's result type on 32-bit platforms.
+type OrientationResult struct {
+	Value   uint16
+	Present bool
+	Err     error
+}
+
+// ReadOrientationFromFile is unavailable on 32-bit platforms.
+func ReadOrientationFromFile(ctx context.Context, path string, r io.ReadSeeker) OrientationResult {
+	return OrientationResult{Err: errors.New("image orientation is not supported on this platform")}
+}
 
 // ExtractEmbeddedPreview is unavailable on 32-bit platforms (imagemeta dependency omitted).
 func ExtractEmbeddedPreview(ctx context.Context, path string) ([]byte, error) {

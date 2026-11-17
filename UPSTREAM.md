@@ -77,3 +77,16 @@ our upstream baseline. Modified text files carry in-file notices; modified JSON
 and PNG files have adjacent `.NOTICE` files. Existing upstream declarations and
 the Aves BSD-3-Clause license text are retained. These records do not replace
 third-party license requirements or claim a completed dependency-license review.
+
+## Development candidate migration (2026-11-17)
+
+The `feature/007-ab-migration` branch imports the 007-A RC4 preview resource
+protection and 007-B RC3 image metadata candidate changes. See
+[the migration record](docs/development/007-ab-migration.md) for source commits,
+scope, and current verification. These candidates are not merged into `main` or
+user-accepted as a mument version. 007-C is not implemented.
+
+Migration verification: the six affected-package race checks passed. The full
+native suite encountered an intermittent panic in the unchanged events package;
+baseline-only repeated checks did not reproduce it. See the migration record for
+all limits, skipped optional checks, and the unresolved event lifecycle issue.
