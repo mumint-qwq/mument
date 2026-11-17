@@ -1,0 +1,1065 @@
+{
+  "schema_version": 1,
+  "status": "contract for D1/D2; generated 2026-10-29",
+  "limits": {
+    "max_request_bytes": 65536,
+    "max_events_per_batch": 50,
+    "max_event_bytes": 2048,
+    "max_batch_bytes": 49152,
+    "history_events": 1000,
+    "history_bytes": 1048576,
+    "upload_queue_events": 200,
+    "upload_queue_bytes": 262144,
+    "client_session_hex": 32,
+    "entry_codes": 4096,
+    "detailed_max_ms": 600000,
+    "error_dedupe_ms": 10000,
+    "context_window_ms": 30000,
+    "context_events": 100,
+    "auto_promote_max": 20,
+    "anomaly_repeat_ms": 30000,
+    "send_interval_ms": 5000,
+    "upload_timeout_ms": 5000,
+    "retry_backoff_ms": [
+      5000,
+      10000,
+      20000,
+      40000
+    ],
+    "max_attempts": 5,
+    "max_batch_age_ms": 120000
+  },
+  "patterns": {
+    "client_session": "^[0-9a-f]{32}$",
+    "batch_ref": "^[0-9a-f]{32}$",
+    "request_ref": "^[0-9a-f]{32}$",
+    "load_ref": "^l[0-9]{1,12}$",
+    "operation_ref": "^o[0-9]{1,12}$",
+    "incident_ref": "^n[0-9]{1,12}$",
+    "commit": "^[0-9a-f]{40}$",
+    "build_version": "^[A-Za-z0-9._-]{1,96}$"
+  },
+  "base_fields": [
+    "seq",
+    "t_ms",
+    "level",
+    "event",
+    "load_ref",
+    "operation_ref",
+    "request_ref",
+    "incident_ref",
+    "data"
+  ],
+  "levels": [
+    "debug",
+    "info",
+    "warn",
+    "error"
+  ],
+  "events": {
+    "session.start": {
+      "level": "info",
+      "fields": {
+        "browser_family": {
+          "t": "enum",
+          "v": [
+            "chrome",
+            "firefox",
+            "safari",
+            "edge",
+            "other",
+            "unknown"
+          ]
+        },
+        "browser_major": {
+          "t": "int",
+          "min": 0,
+          "max": 999,
+          "nullable": true
+        },
+        "viewport_width": {
+          "t": "int",
+          "min": 0,
+          "max": 20000
+        },
+        "viewport_height": {
+          "t": "int",
+          "min": 0,
+          "max": 20000
+        },
+        "dpr": {
+          "t": "num",
+          "min": 0.5,
+          "max": 10,
+          "nullable": true
+        },
+        "screen_width": {
+          "t": "int",
+          "min": 0,
+          "max": 20000,
+          "nullable": true
+        },
+        "screen_height": {
+          "t": "int",
+          "min": 0,
+          "max": 20000,
+          "nullable": true
+        },
+        "locale": {
+          "t": "str",
+          "p": "^[A-Za-z-]{2,20}$",
+          "nullable": true
+        },
+        "touch": {
+          "t": "bool"
+        },
+        "capability_long_tasks": {
+          "t": "enum",
+          "v": [
+            "supported",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "capability_memory": {
+          "t": "enum",
+          "v": [
+            "supported",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "capability_paint_timing": {
+          "t": "enum",
+          "v": [
+            "supported",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "mode": {
+          "t": "enum",
+          "v": [
+            "summary",
+            "detailed"
+          ]
+        },
+        "detailed": {
+          "t": "bool"
+        }
+      }
+    },
+    "session.end": {
+      "level": "info",
+      "fields": {
+        "reason": {
+          "t": "enum",
+          "v": [
+            "pagehide",
+            "unload",
+            "logout",
+            "disabled",
+            "manual"
+          ]
+        },
+        "duration_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        }
+      }
+    },
+    "listing.start": {
+      "level": "info",
+      "fields": {
+        "dir_ref": {
+          "t": "ref",
+          "p": "^d\\d{1,12}$"
+        },
+        "view": {
+          "t": "enum",
+          "v": [
+            "mosaic",
+            "gallery",
+            "icons",
+            "list",
+            "compact",
+            "unknown"
+          ]
+        },
+        "sort_by": {
+          "t": "enum",
+          "v": [
+            "name",
+            "size",
+            "modified",
+            "type",
+            "unknown"
+          ]
+        },
+        "sort_asc": {
+          "t": "bool"
+        },
+        "density": {
+          "t": "num",
+          "min": 0,
+          "max": 1,
+          "nullable": true
+        },
+        "paged": {
+          "t": "bool"
+        },
+        "trigger": {
+          "t": "enum",
+          "v": [
+            "initial",
+            "route",
+            "reload",
+            "preview_return",
+            "delete",
+            "sort",
+            "view_change",
+            "hash",
+            "manual"
+          ]
+        }
+      }
+    },
+    "listing.response": {
+      "level": "info",
+      "fields": {
+        "api": {
+          "t": "enum",
+          "v": [
+            "resources",
+            "resources_list"
+          ]
+        },
+        "status": {
+          "t": "int",
+          "min": 0,
+          "max": 599
+        },
+        "headers_wait_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "body_decode_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000,
+          "nullable": true
+        },
+        "known_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000,
+          "nullable": true
+        },
+        "paged": {
+          "t": "bool"
+        },
+        "outcome": {
+          "t": "enum",
+          "v": [
+            "ok",
+            "error",
+            "cancelled",
+            "aborted"
+          ]
+        }
+      }
+    },
+    "listing.store_prepared": {
+      "level": "info",
+      "fields": {
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "item_count": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "selected_before": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "selected_after": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        }
+      }
+    },
+    "listing.layout": {
+      "level": "info",
+      "fields": {
+        "geom_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "groups": {
+          "t": "int",
+          "min": 0,
+          "max": 3
+        },
+        "rows": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "density": {
+          "t": "num",
+          "min": 0,
+          "max": 1,
+          "nullable": true
+        },
+        "width_px": {
+          "t": "int",
+          "min": 0,
+          "max": 20000,
+          "nullable": true
+        },
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "generation": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "method": {
+          "t": "enum",
+          "v": [
+            "mosaic",
+            "estimated",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "listing.first_batch_paint_estimate": {
+      "level": "info",
+      "fields": {
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "queued_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "committed_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "known_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "method": {
+          "t": "enum",
+          "v": [
+            "double_raf",
+            "next_tick",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "listing.mount_summary": {
+      "level": "info",
+      "fields": {
+        "mounted": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "total": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "batches": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "urgent_batches": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "elapsed_sum_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "elapsed_max_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "paused_reason": {
+          "t": "enum",
+          "v": [
+            "none",
+            "scroll",
+            "gesture",
+            "prompt",
+            "hidden",
+            "interaction",
+            "unknown"
+          ]
+        },
+        "dropped": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000,
+          "nullable": true
+        }
+      }
+    },
+    "listing.mount_batch": {
+      "level": "debug",
+      "fields": {
+        "generation": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "urgent": {
+          "t": "bool"
+        },
+        "fast": {
+          "t": "bool"
+        },
+        "size": {
+          "t": "int",
+          "min": 0,
+          "max": 10000
+        },
+        "enqueue_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "flush_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000,
+          "nullable": true
+        }
+      }
+    },
+    "listing.complete": {
+      "level": "info",
+      "fields": {
+        "known_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "mounted_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "paged": {
+          "t": "bool"
+        }
+      }
+    },
+    "listing.cancel": {
+      "level": "info",
+      "fields": {
+        "reason": {
+          "t": "enum",
+          "v": [
+            "route",
+            "reload",
+            "sort",
+            "view",
+            "unmount",
+            "superseded",
+            "error"
+          ]
+        },
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "mounted_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        }
+      }
+    },
+    "scroll.summary": {
+      "level": "info",
+      "fields": {
+        "range_top_px": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "range_height_px": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "fast_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "slow_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "urgent_mounted": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "scrollbar_drag": {
+          "t": "bool",
+          "nullable": true
+        },
+        "samples": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        }
+      }
+    },
+    "layout.change": {
+      "level": "info",
+      "fields": {
+        "reason": {
+          "t": "enum",
+          "v": [
+            "resize",
+            "zoom",
+            "density_ratio",
+            "view_change",
+            "gesture_commit"
+          ]
+        },
+        "old_density": {
+          "t": "num",
+          "min": 0,
+          "max": 1,
+          "nullable": true
+        },
+        "new_density": {
+          "t": "num",
+          "min": 0,
+          "max": 1,
+          "nullable": true
+        },
+        "old_width": {
+          "t": "int",
+          "min": 0,
+          "max": 20000,
+          "nullable": true
+        },
+        "new_width": {
+          "t": "int",
+          "min": 0,
+          "max": 20000,
+          "nullable": true
+        },
+        "generation": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "anchor_ref": {
+          "t": "ref",
+          "p": "^[di]\\d{1,12}$",
+          "nullable": true
+        },
+        "offset_before": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000,
+          "nullable": true
+        },
+        "offset_after": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000,
+          "nullable": true
+        },
+        "result": {
+          "t": "enum",
+          "v": [
+            "success",
+            "failed",
+            "cancelled",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "images.summary": {
+      "level": "info",
+      "fields": {
+        "thumb_requests": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "thumb_ok": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "thumb_failed": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "thumb_cancelled": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "original_requests": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "original_ok": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "original_failed": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "original_cancelled": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "inflight": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "elapsed_sum_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "elapsed_max_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "cache_known": {
+          "t": "enum",
+          "v": [
+            "none",
+            "partial"
+          ]
+        }
+      }
+    },
+    "images.failure": {
+      "level": "warn",
+      "fields": {
+        "item_ref": {
+          "t": "ref",
+          "p": "^i\\d{1,12}$",
+          "nullable": true
+        },
+        "request_kind": {
+          "t": "enum",
+          "v": [
+            "thumb",
+            "original"
+          ]
+        },
+        "status": {
+          "t": "int",
+          "min": 100,
+          "max": 599,
+          "nullable": true
+        },
+        "phase": {
+          "t": "enum",
+          "v": [
+            "network",
+            "decode",
+            "dom",
+            "unknown"
+          ]
+        },
+        "category": {
+          "t": "enum",
+          "v": [
+            "http",
+            "network",
+            "decode",
+            "abort",
+            "other"
+          ]
+        }
+      }
+    },
+    "selection.change": {
+      "level": "info",
+      "fields": {
+        "operation": {
+          "t": "enum",
+          "v": [
+            "add",
+            "remove",
+            "toggle",
+            "range",
+            "clear",
+            "reconcile",
+            "select_all"
+          ]
+        },
+        "before": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "after": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "known_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "multiple": {
+          "t": "bool"
+        },
+        "merged_count": {
+          "t": "int",
+          "min": 1,
+          "max": 1000000
+        }
+      }
+    },
+    "navigation.restore": {
+      "level": "info",
+      "fields": {
+        "reason": {
+          "t": "enum",
+          "v": [
+            "preview_return",
+            "hash",
+            "delete",
+            "keyboard",
+            "paged",
+            "move",
+            "refresh"
+          ]
+        },
+        "target_ref": {
+          "t": "ref",
+          "p": "^[di]\\d{1,12}$",
+          "nullable": true
+        },
+        "pre_mounted": {
+          "t": "bool"
+        },
+        "requested_offset": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000,
+          "nullable": true
+        },
+        "actual_offset": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000,
+          "nullable": true
+        },
+        "result": {
+          "t": "enum",
+          "v": [
+            "success",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "strategy": {
+          "t": "enum",
+          "v": [
+            "identity",
+            "neighbor",
+            "fallback_pixels",
+            "empty"
+          ],
+          "optional": true
+        },
+        "reason_code": {
+          "t": "enum",
+          "v": [
+            "empty_directory",
+            "no_identity",
+            "target_not_mounted",
+            "target_lost_after_scroll",
+            "offset_mismatch",
+            "target_not_in_plan",
+            "reveal_failed",
+            "settle_timeout",
+            "user_scroll",
+            "superseded",
+            "unmounted",
+            "fetch_failed",
+            "directory_changed",
+            "restore_error"
+          ],
+          "optional": true
+        }
+      }
+    },
+    "operation.result": {
+      "level": "info",
+      "fields": {
+        "operation": {
+          "t": "enum",
+          "v": [
+            "delete",
+            "move",
+            "rename",
+            "copy",
+            "archive",
+            "unarchive"
+          ]
+        },
+        "requested": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "succeeded": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "failed": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "elapsed_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "refreshed": {
+          "t": "bool",
+          "nullable": true
+        },
+        "selection_before": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "selection_after": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "outcome": {
+          "t": "enum",
+          "v": [
+            "ok",
+            "partial",
+            "failed",
+            "unknown"
+          ],
+          "optional": true
+        }
+      }
+    },
+    "runtime.error": {
+      "level": "error",
+      "fields": {
+        "category": {
+          "t": "enum",
+          "v": [
+            "vue",
+            "window",
+            "unhandled",
+            "resource",
+            "other"
+          ]
+        },
+        "code": {
+          "t": "str",
+          "p": "^[A-Za-z0-9_.-]{1,64}$",
+          "nullable": true
+        },
+        "fingerprint": {
+          "t": "str",
+          "p": "^[0-9a-f]{8,32}$"
+        },
+        "frames": {
+          "t": "array",
+          "max": 8,
+          "items": {
+            "t": "obj",
+            "fields": {
+              "file": {
+                "t": "str",
+                "p": "^[A-Za-z0-9._-]{1,128}\\.js$"
+              },
+              "line": {
+                "t": "int",
+                "min": 0,
+                "max": 10000000
+              },
+              "col": {
+                "t": "int",
+                "min": 0,
+                "max": 10000000
+              }
+            }
+          }
+        },
+        "repeat_count": {
+          "t": "int",
+          "min": 1,
+          "max": 1000000
+        }
+      }
+    },
+    "perf.long_task_summary": {
+      "level": "info",
+      "fields": {
+        "count": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "sum_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "max_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "phase": {
+          "t": "enum",
+          "v": [
+            "startup",
+            "first_batch",
+            "background",
+            "interaction",
+            "unknown"
+          ]
+        },
+        "supported": {
+          "t": "bool"
+        }
+      }
+    },
+    "anomaly.detected": {
+      "level": "warn",
+      "fields": {
+        "kind": {
+          "t": "enum",
+          "v": [
+            "viewport_mount_gap",
+            "mount_stalled",
+            "restore_target_missing",
+            "selection_identity_mismatch",
+            "listing_slow"
+          ]
+        },
+        "duration_ms": {
+          "t": "num",
+          "min": 0,
+          "max": 100000000
+        },
+        "mounted": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "known_items": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "generation": {
+          "t": "int",
+          "min": 0,
+          "max": 1000000
+        },
+        "evidence": {
+          "t": "enum",
+          "v": [
+            "plan_only",
+            "dom_probe"
+          ]
+        }
+      }
+    },
+    "user.marker": {
+      "level": "info",
+      "fields": {
+        "category": {
+          "t": "enum",
+          "v": [
+            "slow_load",
+            "blank_cards",
+            "position_jump",
+            "selection_issue",
+            "other"
+          ]
+        },
+        "mode": {
+          "t": "enum",
+          "v": [
+            "summary",
+            "detailed"
+          ]
+        }
+      }
+    }
+  }
+}

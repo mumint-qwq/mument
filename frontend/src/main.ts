@@ -1,0 +1,49 @@
+// Modified from FileBrowser Quantum for the mument derivative. See MODIFICATIONS.md.
+import { createApp } from "vue";
+import i18n from "@/i18n";
+import { state } from "@/store"; // Adjust the path as per your setup
+import App from "./App.vue"; // Adjust the path as per your setup
+import router from "./router"; // Adjust the path as per your setup
+
+import "./css/styles.css";
+import "./css/dark.css";
+import { initPwaInstall } from "@/utils/pwaInstall";
+import { defaultDarkMode, syncDocumentTheme } from "@/utils/theme";
+import { initViewportLayoutListener } from "@/utils/viewport.js";
+import { initDiagnostics } from "@/utils/diagnostics/runtime.js";
+
+initPwaInstall();
+initViewportLayoutListener();
+syncDocumentTheme(defaultDarkMode());
+
+const app = createApp(App);
+
+// Diagnostics observes errors and browser lifecycle; it never blocks mount.
+initDiagnostics(app);
+
+// Install additionals
+app.use(i18n);
+app.use(router);
+
+// Provide state to the entire application
+app.provide("state", state);
+
+// provide v-focus for components
+app.directive("focus", {
+  mounted: (el) => {
+    // A longer timeout is sometimes needed to win a "focus race"
+    // against other parts of the app that might be managing focus.
+    setTimeout(() => {
+      el.focus();
+    }, 100);
+  },
+});
+
+app.mixin({
+  mounted() {
+    // expose vue instance to components
+    this.$el.__vue__ = this;
+  },
+});
+
+void router.isReady().then(() => app.mount("#app"));

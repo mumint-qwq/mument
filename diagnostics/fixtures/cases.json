@@ -1,0 +1,2384 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-29",
+  "notes": "Shared client/server conformance cases. Events are single-event batches by default; envelope overrides merge onto defaults.",
+  "defaults": {
+    "client_session": "0123456789abcdef0123456789abcdef",
+    "batch_ref": "fedcba9876543210fedcba9876543210",
+    "client_build": {
+      "version": "v2.0.2-quantum-diag-rc1",
+      "commit": "77f46d36dff09f7cb20b32fb3f98daa9e47e23c3"
+    }
+  },
+  "cases": [
+    {
+      "name": "valid_session_start",
+      "event": {
+        "seq": 1,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "session.start",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "browser_family": "chrome",
+          "browser_major": 141,
+          "viewport_width": 414,
+          "viewport_height": 900,
+          "dpr": 2.75,
+          "screen_width": 414,
+          "screen_height": 900,
+          "locale": "zh-CN",
+          "touch": true,
+          "capability_long_tasks": "supported",
+          "capability_memory": "unknown",
+          "capability_paint_timing": "unsupported",
+          "mode": "summary",
+          "detailed": false
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_session_end",
+      "event": {
+        "seq": 2,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "session.end",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "pagehide",
+          "duration_ms": 42000
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_start",
+      "event": {
+        "seq": 3,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.start",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "dir_ref": "d12",
+          "view": "mosaic",
+          "sort_by": "name",
+          "sort_asc": true,
+          "density": 0.5,
+          "paged": false,
+          "trigger": "route"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_response",
+      "event": {
+        "seq": 4,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_store_prepared",
+      "event": {
+        "seq": 5,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.store_prepared",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "elapsed_ms": 42.1,
+          "item_count": 4000,
+          "selected_before": 0,
+          "selected_after": 0
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_layout",
+      "event": {
+        "seq": 6,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.layout",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "geom_items": 4000,
+          "groups": 2,
+          "rows": 920,
+          "density": 0.5,
+          "width_px": 414,
+          "elapsed_ms": 18.4,
+          "generation": 3,
+          "method": "mosaic"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_first_batch_paint_estimate",
+      "event": {
+        "seq": 7,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.first_batch_paint_estimate",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "elapsed_ms": 410.2,
+          "queued_items": 6,
+          "committed_items": 4,
+          "known_items": 4000,
+          "method": "double_raf"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_mount_summary",
+      "event": {
+        "seq": 8,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.mount_summary",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "mounted": 120,
+          "total": 4000,
+          "batches": 20,
+          "urgent_batches": 2,
+          "elapsed_sum_ms": 55.3,
+          "elapsed_max_ms": 8.1,
+          "paused_reason": "none",
+          "dropped": 0
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_mount_batch",
+      "event": {
+        "seq": 9,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.mount_batch",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "generation": 3,
+          "urgent": false,
+          "fast": false,
+          "size": 96,
+          "enqueue_ms": 0.6,
+          "flush_ms": 3.4
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_complete",
+      "event": {
+        "seq": 10,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.complete",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "known_items": 4000,
+          "mounted_items": 4000,
+          "elapsed_ms": 2400.5,
+          "paged": false
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_listing_cancel",
+      "event": {
+        "seq": 11,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.cancel",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "route",
+          "elapsed_ms": 300.1,
+          "mounted_items": 40
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_scroll_summary",
+      "event": {
+        "seq": 12,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "scroll.summary",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "range_top_px": 1200.5,
+          "range_height_px": 4800.2,
+          "fast_ms": 300,
+          "slow_ms": 900,
+          "urgent_mounted": 12,
+          "scrollbar_drag": false,
+          "samples": 80
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_layout_change",
+      "event": {
+        "seq": 13,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "layout.change",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "resize",
+          "old_density": 0.4,
+          "new_density": 0.5,
+          "old_width": 390,
+          "new_width": 414,
+          "generation": 4,
+          "anchor_ref": "i81",
+          "offset_before": 120.5,
+          "offset_after": 122.5,
+          "result": "success"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_images_summary",
+      "event": {
+        "seq": 14,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "images.summary",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "thumb_requests": 120,
+          "thumb_ok": 118,
+          "thumb_failed": 2,
+          "thumb_cancelled": 5,
+          "original_requests": 3,
+          "original_ok": 3,
+          "original_failed": 0,
+          "original_cancelled": 0,
+          "inflight": 4,
+          "elapsed_sum_ms": 880.1,
+          "elapsed_max_ms": 190.5,
+          "cache_known": "none"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_images_failure",
+      "event": {
+        "seq": 15,
+        "t_ms": 12.5,
+        "level": "warn",
+        "event": "images.failure",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "item_ref": "i81",
+          "request_kind": "thumb",
+          "status": 404,
+          "phase": "network",
+          "category": "http"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_selection_change",
+      "event": {
+        "seq": 16,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "selection.change",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "toggle",
+          "before": 1,
+          "after": 2,
+          "known_items": 4000,
+          "multiple": true,
+          "merged_count": 1
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_navigation_restore",
+      "event": {
+        "seq": 17,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "navigation.restore",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "preview_return",
+          "target_ref": "i81",
+          "pre_mounted": true,
+          "requested_offset": 600,
+          "actual_offset": 600,
+          "result": "success",
+          "elapsed_ms": 33.2
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_operation_result",
+      "event": {
+        "seq": 18,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "operation.result",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "delete",
+          "requested": 1,
+          "succeeded": 1,
+          "failed": 0,
+          "elapsed_ms": 1400.2,
+          "refreshed": true,
+          "selection_before": 1,
+          "selection_after": 0
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_runtime_error",
+      "event": {
+        "seq": 19,
+        "t_ms": 12.5,
+        "level": "error",
+        "event": "runtime.error",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "category": "vue",
+          "code": null,
+          "fingerprint": "0123456789abcdef",
+          "frames": [
+            {
+              "file": "index-abc123.js",
+              "line": 120,
+              "col": 44
+            }
+          ],
+          "repeat_count": 1
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_perf_long_task_summary",
+      "event": {
+        "seq": 20,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "perf.long_task_summary",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "count": 3,
+          "sum_ms": 180.2,
+          "max_ms": 92.4,
+          "phase": "background",
+          "supported": true
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_anomaly_detected",
+      "event": {
+        "seq": 21,
+        "t_ms": 12.5,
+        "level": "warn",
+        "event": "anomaly.detected",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "kind": "listing_slow",
+          "duration_ms": 1600,
+          "mounted": 6,
+          "known_items": 4000,
+          "generation": 3,
+          "evidence": "plan_only"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_user_marker",
+      "event": {
+        "seq": 22,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "user.marker",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "category": "slow_load",
+          "mode": "summary"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_request_ref",
+      "event": {
+        "seq": 23,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_null_optional",
+      "event": {
+        "seq": 24,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": null,
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 0,
+          "body_decode_ms": null,
+          "known_items": null,
+          "paged": false,
+          "outcome": "cancelled"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "invalid_unknown_event",
+      "event": {
+        "seq": 25,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.unknown",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_unknown_field",
+      "event": {
+        "seq": 26,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok",
+          "filename": "secret.jpg"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_path_field",
+      "event": {
+        "seq": 27,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok",
+          "path": "/srv/pictures/a.jpg"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_cookie_field",
+      "event": {
+        "seq": 28,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok",
+          "cookie": "session=abc"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_token_field",
+      "event": {
+        "seq": 29,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok",
+          "token": "eyJhbGciOi"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_string_number",
+      "event": {
+        "seq": 30,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": "200",
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_negative_elapsed",
+      "event": {
+        "seq": 31,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": -1,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_float_items",
+      "event": {
+        "seq": 32,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 1.5,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_enum",
+      "event": {
+        "seq": 33,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "done"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_dir_ref",
+      "event": {
+        "seq": 34,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.start",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "dir_ref": "x12",
+          "view": "mosaic",
+          "sort_by": "name",
+          "sort_asc": true,
+          "density": 0.5,
+          "paged": false,
+          "trigger": "route"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_bool",
+      "event": {
+        "seq": 35,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.start",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "dir_ref": "d12",
+          "view": "mosaic",
+          "sort_by": "name",
+          "sort_asc": "true",
+          "density": 0.5,
+          "paged": false,
+          "trigger": "route"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_marker_path",
+      "event": {
+        "seq": 36,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "user.marker",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "category": "slow_load",
+          "mode": "summary",
+          "path": "/secret"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_fingerprint",
+      "event": {
+        "seq": 37,
+        "t_ms": 12.5,
+        "level": "error",
+        "event": "runtime.error",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "category": "vue",
+          "code": null,
+          "fingerprint": "xyz",
+          "frames": [],
+          "repeat_count": 1
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_nine_frames",
+      "event": {
+        "seq": 38,
+        "t_ms": 12.5,
+        "level": "error",
+        "event": "runtime.error",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "category": "vue",
+          "code": null,
+          "fingerprint": "0123456789abcdef",
+          "frames": [
+            {
+              "file": "a-0.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-1.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-2.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-3.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-4.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-5.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-6.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-7.js",
+              "line": 1,
+              "col": 1
+            },
+            {
+              "file": "a-8.js",
+              "line": 1,
+              "col": 1
+            }
+          ],
+          "repeat_count": 1
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_absolute_frame",
+      "event": {
+        "seq": 39,
+        "t_ms": 12.5,
+        "level": "error",
+        "event": "runtime.error",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "category": "vue",
+          "code": null,
+          "fingerprint": "0123456789abcdef",
+          "frames": [
+            {
+              "file": "https://evil.example/a.js",
+              "line": 1,
+              "col": 1
+            }
+          ],
+          "repeat_count": 1
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_http_status",
+      "event": {
+        "seq": 40,
+        "t_ms": 12.5,
+        "level": "warn",
+        "event": "images.failure",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "item_ref": "i81",
+          "request_kind": "thumb",
+          "status": 1000,
+          "phase": "network",
+          "category": "http"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_negative_count",
+      "event": {
+        "seq": 41,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "selection.change",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "toggle",
+          "before": -1,
+          "after": 2,
+          "known_items": 4000,
+          "multiple": true,
+          "merged_count": 1
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_deep_nested",
+      "event": {
+        "seq": 42,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.layout",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "geom_items": 4000,
+          "groups": 2,
+          "rows": 920,
+          "density": 0.5,
+          "width_px": 414,
+          "elapsed_ms": 18.4,
+          "generation": 3,
+          "method": "mosaic",
+          "extra": {
+            "nested": {
+              "deeper": {
+                "x": 1
+              }
+            }
+          }
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_seq_zero",
+      "event": {
+        "seq": 0,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_seq_float",
+      "event": {
+        "seq": 1.5,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_load_ref",
+      "event": {
+        "seq": 45,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_request_ref",
+      "event": {
+        "seq": 46,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": "ABC",
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_event_extra_field",
+      "event": {
+        "seq": 47,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        },
+        "extra": true
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_level",
+      "event": {
+        "seq": 48,
+        "t_ms": 12.5,
+        "level": "fatal",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 88.2,
+          "body_decode_ms": 61.5,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "missing_required_field",
+      "event": {
+        "seq": 49,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 1,
+          "known_items": 1,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_client_session",
+      "event": {
+        "seq": 50,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 1,
+          "body_decode_ms": null,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false,
+      "envelope": {
+        "client_session": "0123456789ABCDEF0123456789abcdef"
+      }
+    },
+    {
+      "name": "invalid_schema_version",
+      "event": {
+        "seq": 50,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 1,
+          "body_decode_ms": null,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false,
+      "envelope": {
+        "schema_version": 2
+      }
+    },
+    {
+      "name": "invalid_client_build_version",
+      "event": {
+        "seq": 50,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 1,
+          "body_decode_ms": null,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false,
+      "envelope": {
+        "client_build": {
+          "version": "bad/version",
+          "commit": "77f46d36dff09f7cb20b32fb3f98daa9e47e23c3"
+        }
+      }
+    },
+    {
+      "name": "invalid_client_build_commit",
+      "event": {
+        "seq": 50,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 1,
+          "body_decode_ms": null,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false,
+      "envelope": {
+        "client_build": {
+          "version": "v1",
+          "commit": "abc"
+        }
+      }
+    },
+    {
+      "name": "invalid_batch_extra_field",
+      "event": {
+        "seq": 50,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 200,
+          "headers_wait_ms": 1,
+          "body_decode_ms": null,
+          "known_items": 4000,
+          "paged": false,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false,
+      "envelope": {
+        "actor_ref": "x"
+      }
+    },
+    {
+      "name": "invalid_empty_events",
+      "event": null,
+      "envelope": {
+        "events": []
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_51_events",
+      "events": [
+        {
+          "seq": 51,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 52,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 53,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 54,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 55,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 56,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 57,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 58,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 59,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 60,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 61,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 62,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 63,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 64,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 65,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 66,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 67,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 68,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 69,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 70,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 71,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 72,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 73,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 74,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 75,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 76,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 77,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 78,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 79,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 80,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 81,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 82,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 83,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 84,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 85,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 86,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 87,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 88,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 89,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 90,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 91,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 92,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 93,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 94,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 95,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 96,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 97,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 98,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 99,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 100,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        },
+        {
+          "seq": 101,
+          "t_ms": 12.5,
+          "level": "info",
+          "event": "user.marker",
+          "load_ref": "l3",
+          "operation_ref": null,
+          "request_ref": null,
+          "incident_ref": null,
+          "data": {
+            "category": "other",
+            "mode": "summary"
+          }
+        }
+      ],
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "valid_listing_response_no_http",
+      "event": {
+        "seq": 50,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.response",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "api": "resources",
+          "status": 0,
+          "headers_wait_ms": 5000,
+          "body_decode_ms": null,
+          "known_items": null,
+          "paged": false,
+          "outcome": "error"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_scroll_summary_unknown_drag",
+      "event": {
+        "seq": 51,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "scroll.summary",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "range_top_px": 0,
+          "range_height_px": 0,
+          "fast_ms": 0,
+          "slow_ms": 0,
+          "urgent_mounted": 0,
+          "scrollbar_drag": null,
+          "samples": 0
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_layout_change_unknown_result",
+      "event": {
+        "seq": 52,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "layout.change",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "resize",
+          "old_density": 0.5,
+          "new_density": 0.5,
+          "old_width": 414,
+          "new_width": 414,
+          "generation": 1,
+          "anchor_ref": null,
+          "offset_before": null,
+          "offset_after": null,
+          "result": "unknown"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_operation_result_unknown_refresh",
+      "event": {
+        "seq": 53,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "operation.result",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "delete",
+          "requested": 1,
+          "succeeded": 1,
+          "failed": 0,
+          "elapsed_ms": 10,
+          "refreshed": null,
+          "selection_before": 1,
+          "selection_after": 1
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_mount_summary_unknown_dropped",
+      "event": {
+        "seq": 54,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "listing.mount_summary",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "mounted": 10,
+          "total": 10,
+          "batches": 1,
+          "urgent_batches": 0,
+          "elapsed_sum_ms": 1,
+          "elapsed_max_ms": 1,
+          "paused_reason": "none",
+          "dropped": null
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_navigation_restore_move",
+      "event": {
+        "seq": 55,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "navigation.restore",
+        "load_ref": "l3",
+        "operation_ref": "o7",
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "move",
+          "target_ref": "i81",
+          "pre_mounted": false,
+          "requested_offset": 50000,
+          "actual_offset": 50004,
+          "result": "success",
+          "elapsed_ms": 120.5,
+          "strategy": "identity"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_operation_result_move_outcome_ok",
+      "event": {
+        "seq": 56,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "operation.result",
+        "load_ref": "l3",
+        "operation_ref": "o7",
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "move",
+          "requested": 7,
+          "succeeded": 7,
+          "failed": 0,
+          "elapsed_ms": 1301.4,
+          "refreshed": null,
+          "selection_before": 7,
+          "selection_after": 7,
+          "outcome": "ok"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "valid_operation_result_move_outcome_unknown_partial",
+      "event": {
+        "seq": 57,
+        "t_ms": 12.5,
+        "level": "warn",
+        "event": "operation.result",
+        "load_ref": "l3",
+        "operation_ref": "o8",
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "move",
+          "requested": 7,
+          "succeeded": 5,
+          "failed": 0,
+          "elapsed_ms": 900,
+          "refreshed": null,
+          "selection_before": 7,
+          "selection_after": 7,
+          "outcome": "unknown"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    },
+    {
+      "name": "invalid_navigation_restore_unknown_reason",
+      "event": {
+        "seq": 58,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "navigation.restore",
+        "load_ref": "l3",
+        "operation_ref": null,
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "sidebar",
+          "target_ref": null,
+          "pre_mounted": false,
+          "requested_offset": null,
+          "actual_offset": 0,
+          "result": "cancelled",
+          "elapsed_ms": 1
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "invalid_operation_result_outcome_value",
+      "event": {
+        "seq": 59,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "operation.result",
+        "load_ref": "l3",
+        "operation_ref": "o9",
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "operation": "move",
+          "requested": 1,
+          "succeeded": 1,
+          "failed": 0,
+          "elapsed_ms": 10,
+          "refreshed": null,
+          "selection_before": 1,
+          "selection_after": 1,
+          "outcome": "maybe"
+        }
+      },
+      "expect_client": false,
+      "expect_server": false
+    },
+    {
+      "name": "valid_navigation_restore_cancelled_superseded",
+      "event": {
+        "seq": 56,
+        "t_ms": 12.5,
+        "level": "info",
+        "event": "navigation.restore",
+        "load_ref": "l3",
+        "operation_ref": "o7",
+        "request_ref": null,
+        "incident_ref": null,
+        "data": {
+          "reason": "move",
+          "target_ref": null,
+          "pre_mounted": false,
+          "requested_offset": 5000,
+          "actual_offset": 731,
+          "result": "cancelled",
+          "elapsed_ms": 120.5,
+          "strategy": "fallback_pixels",
+          "reason_code": "superseded"
+        }
+      },
+      "expect_client": true,
+      "expect_server": true
+    }
+  ]
+}
