@@ -74,6 +74,8 @@ bin/
 backend/custom.css
 
 # Runtime cache directories created by tests/application
+/.local-tools/
+/.validation/
 backend/preview/heic/
 backend/preview/thumbnails/
 

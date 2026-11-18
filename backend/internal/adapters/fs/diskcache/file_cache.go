@@ -157,6 +157,28 @@ func (f *FileCache) Load(ctx context.Context, key string) (value []byte, exist b
 	return value, true, nil
 }
 
+// LoadSized bounds reads for ledger results. A size mismatch returns no bytes
+// with exist=true so the caller can invalidate its publication record.
+func (f *FileCache) LoadSized(ctx context.Context, key string, size int64) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	r, ok, err := f.open(key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	defer r.Close()
+	info, err := r.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() != size {
+		return nil, true, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, size+1))
+	return data, err == nil, err
+}
+
 func (f *FileCache) Delete(ctx context.Context, key string) error {
 	mu := f.getScopedLocks(key)
 	mu.Lock()

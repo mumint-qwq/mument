@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
 	"github.com/gtsteffaniak/go-logger/logger"
@@ -76,9 +77,21 @@ var (
 // PendingDelete is an index row (or subtree) that must be removed because the
 // filesystem operation already moved it away.
 type PendingDelete struct {
-	Path      string
-	IsDir     bool
-	Recursive bool
+	Path             string
+	IsDir, Recursive bool
+	imageTree        *movedImageTree
+}
+
+// This hint is consumed by the existing background delete/refresh round.
+// The preview ledger independently resolves descendants by directory identity.
+type movedImageTree struct {
+	targetSource, targetDir, targetPath string
+	version                             cacheledger.Version
+}
+
+func (m *movedImageTree) stillCurrent() bool {
+	current, err := cacheledger.Observe(m.targetPath)
+	return err == nil && current.Strong && current.Dev == m.version.Dev && current.Ino == m.version.Ino
 }
 
 // DirectoryRefresh is the index maintenance a successful file operation still
@@ -139,6 +152,7 @@ func (w *directoryWork) merge(impact DirectoryRefresh) {
 		for i := range w.deletes {
 			if w.deletes[i].Path == deletion.Path && w.deletes[i].IsDir == deletion.IsDir {
 				w.deletes[i].Recursive = w.deletes[i].Recursive || deletion.Recursive
+				w.deletes[i].imageTree = deletion.imageTree
 				merged = true
 				break
 			}
@@ -691,6 +705,13 @@ func runDirectoryRefresh(snapshot *refreshSnapshot) (err error) {
 		return errIndexingDisabled
 	}
 	for _, deletion := range snapshot.work.deletes {
+		if tree := deletion.imageTree; tree != nil {
+			if dst := indexing.GetIndex(tree.targetSource); dst != nil {
+				if transferErr := indexing.TransferMovedDirectoryImages(idx, dst, deletion.Path, tree.targetDir, tree.stillCurrent); transferErr != nil {
+					logger.Warningf("image metadata transfer for moved directory failed: %v", transferErr)
+				}
+			}
+		}
 		if !idx.DeleteMetadata(deletion.Path, deletion.IsDir, deletion.Recursive) {
 			return fmt.Errorf("could not delete index metadata for %s", deletion.Path)
 		}

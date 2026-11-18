@@ -326,3 +326,10 @@ history or candidate deployment tooling is included.
 | Modified | `frontend/public/config.generated.yaml` (budget example; adjacent notice retained) |
 
 Development workflow and migration status are documented in [docs/development](docs/development/README.md).
+
+## 007-C development
+
+The 007-C branch adds the [cache ledger and controlled move reuse](docs/development/007c/IMPLEMENTATION.md).
+The ledger, move adapter, image transfer queries, tests, and tooling are
+listed in its implementation record. Modified upstream Go files retain their
+original notices and source provenance.

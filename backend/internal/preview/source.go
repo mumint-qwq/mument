@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 )
 
 // sourceBinding ties an admission estimate to the exact file that was inspected.
@@ -63,7 +65,7 @@ func (b sourceBinding) matches(f *os.File) bool {
 	if b.size != info.Size() {
 		return false
 	}
-	return b.modTime.Equal(info.ModTime())
+	return b.modTime.Equal(info.ModTime()) && cacheledger.FromFileInfo(b.info) == cacheledger.FromFileInfo(info)
 }
 
 func (b sourceBinding) matchesPath(path string) bool {
@@ -80,7 +82,7 @@ func (b sourceBinding) matchesPath(path string) bool {
 	if b.size != info.Size() {
 		return false
 	}
-	return b.modTime.Equal(info.ModTime())
+	return b.modTime.Equal(info.ModTime()) && cacheledger.FromFileInfo(b.info) == cacheledger.FromFileInfo(info)
 }
 
 func openBoundSource(ctx context.Context, path string, binding sourceBinding) (*os.File, error) {

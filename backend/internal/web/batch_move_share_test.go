@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -53,7 +55,9 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(shared, "a", "x.jpg"), []byte("x"), 0o644); err != nil {
+	writeMoveImage(t, filepath.Join(shared, "a", "x.jpg"), 118)
+	writeMoveImage(t, filepath.Join(root, "outside.jpg"), 119)
+	if err := preview.StartPreviewGenerator(2, filepath.Join(root, "previews")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -133,6 +137,11 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 		_ = files.WaitForIndexMaintenance(ctx)
 		cancel()
 		srv.Close()
+		previewCtx, cancelPreview := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := preview.Shutdown(previewCtx); err != nil {
+			t.Error(err)
+		}
+		cancelPreview()
 		indexing.ClearTestIndices()
 		indexing.SetIndexDBForTesting(nil)
 		_ = db.Close()
@@ -143,6 +152,33 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 		settings.Config.Server.SourceMap = prevSourceMap
 		settings.Config.Server.NameToSource = prevNameToSource
 	})
+
+	getPreview := func(path string) (int, []byte) {
+		t.Helper()
+		q := url.Values{"hash": {shareHash}, "path": {path}, "size": {"small"}}
+		resp, err := client.Get(srv.URL + "/public/api/resources/preview?" + q.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, data
+	}
+	status, previewBefore := getPreview("a/x.jpg")
+	if status != http.StatusOK {
+		t.Fatalf("public source preview status %d: %s", status, previewBefore)
+	}
+	warm := preview.GetService().Stats().FullDecodes
+	if warm != 1 {
+		t.Fatalf("expected real preview decode, got %d", warm)
+	}
+	forbidden, detail := getPreview("../outside.jpg")
+	if forbidden == http.StatusOK || bytes.Contains(detail, []byte(root)) {
+		t.Fatalf("share preview outside scope: status=%d body=%s", forbidden, detail)
+	}
 
 	payload, err := json.Marshal(map[string]any{
 		"action": "move",
@@ -173,6 +209,13 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 	}
 	if len(body.Succeeded) != 1 || len(body.Failed) != 0 {
 		t.Fatalf("public move response = %s", string(raw))
+	}
+	status, previewAfter := getPreview("b/x.jpg")
+	if status != http.StatusOK || !bytes.Equal(previewBefore, previewAfter) {
+		t.Fatalf("public moved preview status=%d equal=%t", status, bytes.Equal(previewBefore, previewAfter))
+	}
+	if after := preview.GetService().Stats().FullDecodes; runtime.GOOS == "linux" && runtime.GOARCH != "386" && runtime.GOARCH != "arm" && after != warm {
+		t.Fatalf("public move redecoded preview: %d -> %d", warm, after)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

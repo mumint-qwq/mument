@@ -6,10 +6,10 @@ automated test success or permission to continue development is not acceptance.
 
 - Current migration branch: `feature/007-ab-migration`.
 - Imported candidates: 007-A RC4 and 007-B RC3; see [migration record](007-ab-migration.md).
-- 007-C has not been implemented. The current execution handoff is
-  [007-C cache ledger and move reuse](007c-cache-move-reuse.md). Develop it on a
-  separate feature branch based on the migrated A/B code; do not add it to the
-  A/B migration branch or treat the migration as user acceptance.
+- 007-C development is on `feature/007c-cache-move-reuse` based on the
+  migrated A/B code. See the [task handoff](007c-cache-move-reuse.md),
+  [implementation and build information](007c/IMPLEMENTATION.md), and
+  [validation](007c/VALIDATION.md). The feature is awaiting maintainer review.
 - Preserve mument branding, upstream attribution, and build configuration without
   upstream analytics publishing when porting older Quantum patches.
 - Development, Git merging, pushing source, and deployment are separate actions.

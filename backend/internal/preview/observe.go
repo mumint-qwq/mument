@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/go-logger/logger"
 )
 
@@ -61,42 +62,43 @@ type previewStats struct {
 // reported separately on purpose: Go heap, process RSS and cgroup counters
 // answer different questions and must not be collapsed into one value.
 type PreviewStats struct {
-	CacheHits       uint64 `json:"cacheHits"`
-	CacheMisses     uint64 `json:"cacheMisses"`
-	CacheCorrupt    uint64 `json:"cacheCorrupt"`
-	SharedWaits     uint64 `json:"sharedWaits"`
-	CanceledWaiters uint64 `json:"canceledWaiters"`
-	CanceledQueued  uint64 `json:"canceledQueued"`
-	FullDecodes     uint64 `json:"fullDecodes"`
-	OriginalServed  uint64 `json:"originalServed"`
-	EmbeddedPreview uint64 `json:"embeddedPreview"`
-	Subprocesses    uint64 `json:"subprocesses"`
-	OverBudget      uint64 `json:"overBudget"`
-	HeaderRejected  uint64 `json:"headerRejected"`
-	SourceChanged   uint64 `json:"sourceChanged"`
-	StoreFailures   uint64 `json:"storeFailures"`
-	GeneratedBytes  uint64 `json:"generatedBytes"`
-	Panics          uint64 `json:"panics"`
-	TasksStarted    uint64 `json:"tasksStarted"`
-	TasksCompleted  uint64 `json:"tasksCompleted"`
-	TasksFailed     uint64 `json:"tasksFailed"`
-	MemoryReclaims  uint64 `json:"memoryReclaims"`
-	EntryRejected   uint64 `json:"entryRejected"`
-	WaiterRejected  uint64 `json:"waiterRejected"`
-	HeaderReads     uint64 `json:"headerReads"`
-	ActiveTasks     int64  `json:"activeTasks"`
-	WaitingTasks    int64  `json:"waitingTasks"`
-	HTTPWaiters     int64  `json:"httpWaiters"`
-	PeakActive      int64  `json:"peakActive"`
-	PeakWaiting     int64  `json:"peakWaiting"`
-	PeakReserved    int64  `json:"peakReservedBytes"`
-	ReservedBytes   int64  `json:"reservedBytes"`
-	TaskSlots       int64  `json:"taskSlots"`
-	TaskSlotsInUse  int64  `json:"taskSlotsInUse"`
-	PeakTaskSlots   int64  `json:"peakTaskSlots"`
-	QueueWaitNanos  uint64 `json:"queueWaitNanos"`
-	GenerateNanos   uint64 `json:"generateNanos"`
-	PublishNanos    uint64 `json:"publishNanos"`
+	LedgerMoves     cacheledger.MoveStats `json:"ledgerMoves"`
+	CacheHits       uint64                `json:"cacheHits"`
+	CacheMisses     uint64                `json:"cacheMisses"`
+	CacheCorrupt    uint64                `json:"cacheCorrupt"`
+	SharedWaits     uint64                `json:"sharedWaits"`
+	CanceledWaiters uint64                `json:"canceledWaiters"`
+	CanceledQueued  uint64                `json:"canceledQueued"`
+	FullDecodes     uint64                `json:"fullDecodes"`
+	OriginalServed  uint64                `json:"originalServed"`
+	EmbeddedPreview uint64                `json:"embeddedPreview"`
+	Subprocesses    uint64                `json:"subprocesses"`
+	OverBudget      uint64                `json:"overBudget"`
+	HeaderRejected  uint64                `json:"headerRejected"`
+	SourceChanged   uint64                `json:"sourceChanged"`
+	StoreFailures   uint64                `json:"storeFailures"`
+	GeneratedBytes  uint64                `json:"generatedBytes"`
+	Panics          uint64                `json:"panics"`
+	TasksStarted    uint64                `json:"tasksStarted"`
+	TasksCompleted  uint64                `json:"tasksCompleted"`
+	TasksFailed     uint64                `json:"tasksFailed"`
+	MemoryReclaims  uint64                `json:"memoryReclaims"`
+	EntryRejected   uint64                `json:"entryRejected"`
+	WaiterRejected  uint64                `json:"waiterRejected"`
+	HeaderReads     uint64                `json:"headerReads"`
+	ActiveTasks     int64                 `json:"activeTasks"`
+	WaitingTasks    int64                 `json:"waitingTasks"`
+	HTTPWaiters     int64                 `json:"httpWaiters"`
+	PeakActive      int64                 `json:"peakActive"`
+	PeakWaiting     int64                 `json:"peakWaiting"`
+	PeakReserved    int64                 `json:"peakReservedBytes"`
+	ReservedBytes   int64                 `json:"reservedBytes"`
+	TaskSlots       int64                 `json:"taskSlots"`
+	TaskSlotsInUse  int64                 `json:"taskSlotsInUse"`
+	PeakTaskSlots   int64                 `json:"peakTaskSlots"`
+	QueueWaitNanos  uint64                `json:"queueWaitNanos"`
+	GenerateNanos   uint64                `json:"generateNanos"`
+	PublishNanos    uint64                `json:"publishNanos"`
 
 	BudgetBytes   int64  `json:"budgetBytes"`
 	MaxConcurrent int    `json:"maxConcurrent"`
@@ -178,7 +180,11 @@ func (s *Service) Stats() PreviewStats {
 	if s == nil {
 		return PreviewStats{}
 	}
-	return s.stats.snapshot(s.budget.maxBytes, s.budget.maxConcurrent, s.tasks.capacity())
+	stats := s.stats.snapshot(s.budget.maxBytes, s.budget.maxConcurrent, s.tasks.capacity())
+	if s.ledger != nil {
+		stats.LedgerMoves = s.ledger.MoveStats()
+	}
+	return stats
 }
 
 // sampleLoop is the only background goroutine A adds. It is tied to the service

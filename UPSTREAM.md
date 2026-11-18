@@ -84,7 +84,7 @@ The `feature/007-ab-migration` branch imports the 007-A RC4 preview resource
 protection and 007-B RC3 image metadata candidate changes. See
 [the migration record](docs/development/007-ab-migration.md) for source commits,
 scope, and current verification. These candidates are not merged into `main` or
-user-accepted as a mument version. 007-C is not implemented.
+user-accepted as a mument version. See the separate [007-C development record](docs/development/007c/IMPLEMENTATION.md).
 
 Migration verification: the six affected-package race checks passed. The full
 native suite encountered an intermittent panic in the unchanged events package;
