@@ -10,7 +10,14 @@
    file version again. A miss goes through the existing A flight and bounded
    decode path. `generateAndPublish` checks the descriptor and the pathname,
    stores complete bytes, then publishes the result using the pinned
-   reference. Original bytes are handled explicitly.
+   reference. Without a durable reference, the clean path, current stat and
+   variant share only an in-flight task. On weak observations, each waiter
+   checks the task's source identity and the live path again.
+   `deliverPreview` records the first successful foreground use of the
+   verified or newly published result, and coalesces later hits by minute.
+   `WarmPreviewForFile` is used by directory candidate probes. A canceled
+   waiter and a failed publication do not contribute usage. Original bytes
+   create no ready entry.
 3. `ResourcePatchHandler` validates each item and flushes independent moves
    in groups. `prepareCacheMoves` only journals already observed references.
    `renameResources` records explicit rename success and the target stat.

@@ -28,16 +28,20 @@ func TestPublicationAndMoveCAS(t *testing.T) {
 	require.NoError(t, err)
 	dst, err := r.Resolve(ctx, "disk", "/b.jpg", Version{Size: 101, MtimeNS: 10, CtimeNS: 20, Dev: 1, Ino: 3, Strong: true})
 	require.NoError(t, err)
-	require.NoError(t, r.Publish(ctx, src, "large:v1", "source-cache", []byte("source")))
-	require.NoError(t, r.Publish(ctx, dst, "large:v1", "target-cache", []byte("target")))
+	_, err = r.Publish(ctx, src, "large:v1", "source-cache", []byte("source"))
+	require.NoError(t, err)
+	_, err = r.Publish(ctx, dst, "large:v1", "target-cache", []byte("target"))
+	require.NoError(t, err)
 	moves, err := r.Prepare(ctx, []Move{{Ref: src, TargetSource: "disk", TargetPath: "/b.jpg"}})
 	require.NoError(t, err)
 	after := v
 	after.CtimeNS++
 	require.NoError(t, r.CommitRename(ctx, moves[0].ID, after))
 	require.NoError(t, r.CommitRename(ctx, moves[0].ID, after))
-	require.ErrorIs(t, r.Publish(ctx, src, "large:v1", "late", []byte("wrong")), ErrStale)
-	require.ErrorIs(t, r.Publish(ctx, dst, "large:v1", "late", []byte("wrong")), ErrStale)
+	_, err = r.Publish(ctx, src, "large:v1", "late", []byte("wrong"))
+	require.ErrorIs(t, err, ErrStale)
+	_, err = r.Publish(ctx, dst, "large:v1", "late", []byte("wrong"))
+	require.ErrorIs(t, err, ErrStale)
 	newRef, err := r.Resolve(ctx, "disk", "/b.jpg", after)
 	require.NoError(t, err)
 	require.Equal(t, src.Asset, newRef.Asset)
@@ -53,7 +57,7 @@ func TestPublicationAndMoveCAS(t *testing.T) {
 	_, hit, err = r.Lookup(ctx, newRef, "large:v2")
 	require.NoError(t, err)
 	require.False(t, hit, "a new raster algorithm revision needs its own result")
-	require.NoError(t, r.Touch(ctx, newRef, "large:v1", time.Now()))
+	require.NoError(t, r.Touch(ctx, newRef, "large:v1", result, time.Now()))
 	used, hit, err := r.Lookup(ctx, newRef, "large:v1")
 	require.NoError(t, err)
 	require.True(t, hit)
@@ -67,7 +71,8 @@ func TestReplacementAndWeakVersionsMiss(t *testing.T) {
 	v := Version{Size: 100, MtimeNS: 10, CtimeNS: 20, Dev: 1, Ino: 2, Strong: true}
 	old, err := r.Resolve(ctx, "disk", "/a", v)
 	require.NoError(t, err)
-	require.NoError(t, r.Publish(ctx, old, "v", "key", []byte("data")))
+	_, err = r.Publish(ctx, old, "v", "key", []byte("data"))
+	require.NoError(t, err)
 	// Same inode/size/mtime but new ctime cannot inherit the old result.
 	v.CtimeNS++
 	newRef, err := r.Resolve(ctx, "disk", "/a", v)
@@ -117,7 +122,8 @@ func TestBatchRollbackAndRecoveryPreserveNewerReferences(t *testing.T) {
 	require.Equal(t, newRef.Asset, actual.Asset)
 	_, err = r.db.Exec("PRAGMA query_only=ON")
 	require.NoError(t, err)
-	require.Error(t, r.Publish(ctx, actual, "v", "key", []byte("result")))
+	_, err = r.Publish(ctx, actual, "v", "key", []byte("result"))
+	require.Error(t, err)
 }
 
 func TestTargetChangedAfterIntentRejectsCommit(t *testing.T) {
@@ -213,7 +219,7 @@ func runCrashStage(dir, stage string) {
 	if err != nil {
 		os.Exit(4)
 	}
-	if err = repo.Publish(ctx, ref, "large", "file", []byte("generated")); err != nil {
+	if _, err = repo.Publish(ctx, ref, "large", "file", []byte("generated")); err != nil {
 		os.Exit(5)
 	}
 	if stage == "before-intent" {
@@ -239,4 +245,48 @@ func runCrashStage(dir, stage string) {
 		}
 	}
 	os.Exit(23)
+}
+
+func TestForegroundUseCAS(t *testing.T) {
+	r := testRepository(t)
+	ctx := t.Context()
+	v := Version{Size: 100, MtimeNS: 10, CtimeNS: 20, Dev: 1, Ino: 2, Strong: true}
+	ref, err := r.Resolve(ctx, "disk", "/a.jpg", v)
+	require.NoError(t, err)
+	const variant = "small"
+	lookup := func(ref Ref) Result {
+		t.Helper()
+		result, found, err := r.Lookup(ctx, ref, variant)
+		require.NoError(t, err)
+		require.True(t, found)
+		return result
+	}
+	old, err := r.Publish(ctx, ref, variant, "key", []byte("old"))
+	require.NoError(t, err)
+	require.Zero(t, lookup(ref).LastUsedAt)
+
+	// A reader whose bytes were replaced cannot mark the new publication.
+	current, err := r.Publish(ctx, ref, variant, "key", []byte("replacement"))
+	require.NoError(t, err)
+	now := time.Now()
+	require.NoError(t, r.Touch(ctx, ref, variant, old, now))
+	require.Zero(t, lookup(ref).LastUsedAt)
+	require.NoError(t, r.Touch(ctx, ref, variant, current, now))
+	require.Equal(t, now.UnixNano(), lookup(ref).LastUsedAt)
+	// Two waiters can see the same pre-update snapshot.
+	require.NoError(t, r.Touch(ctx, ref, variant, current, now.Add(30*time.Second)))
+	require.Equal(t, now.UnixNano(), lookup(ref).LastUsedAt)
+	later := now.Add(61 * time.Second)
+	require.NoError(t, r.Touch(ctx, ref, variant, current, later))
+	require.Equal(t, later.UnixNano(), lookup(ref).LastUsedAt)
+	require.Equal(t, current.GeneratedAt, lookup(ref).GeneratedAt)
+
+	v.CtimeNS++
+	newRef, err := r.Resolve(ctx, ref.Source, ref.Path, v)
+	require.NoError(t, err)
+	newResult, err := r.Publish(ctx, newRef, variant, "new-generation", []byte("new"))
+	require.NoError(t, err)
+	require.NoError(t, r.Touch(ctx, ref, variant, current, later.Add(time.Minute)))
+	require.Equal(t, newResult, lookup(newRef))
+	require.Zero(t, lookup(newRef).LastUsedAt)
 }

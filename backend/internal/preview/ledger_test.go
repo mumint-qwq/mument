@@ -55,7 +55,8 @@ func TestLedgerCorruptionLegacyAndRestart(t *testing.T) {
 	// A physical old key is usable if its exact bytes and active source
 	// generation have independent publication evidence.
 	legacyKey := CacheKey(previewCacheHash(file), "small", 0)
-	require.NoError(t, svc.ledger.Publish(ctx, plan.ref, plan.variant, legacyKey, first))
+	_, err = svc.ledger.Publish(ctx, plan.ref, plan.variant, legacyKey, first)
+	require.NoError(t, err)
 	adopted, err := svc.getPreviewForFile(ctx, file, "small", "", 0)
 	require.NoError(t, err)
 	require.Equal(t, first, adopted)
@@ -156,4 +157,125 @@ func TestLedgerShutdownWhileRecoveryWaitsForLocationGate(t *testing.T) {
 	require.NoError(t, svc.Shutdown(ctx))
 	_, err = svc.ledger.RecoveryCutoff(ctx)
 	require.Error(t, err)
+}
+
+func TestLedgerForegroundUsage(t *testing.T) {
+	root := t.TempDir()
+	indexing.SetTestIndex("ledger-test", root)
+	t.Cleanup(indexing.ClearTestIndices)
+	svc := newAdmissionService(t, 1, 128)
+	svc.startLedger()
+	require.NotNil(t, svc.ledger)
+	for _, foreground := range []bool{true, false} {
+		name := "foreground"
+		if !foreground {
+			name = "warm"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			file := newNoisyFile(t, root, name+".jpg", 800, 600)
+			file.Source = "ledger-test"
+			plan, err := svc.planLedgerPreview(ctx, file, "small")
+			require.NoError(t, err)
+			if !plan.version.Strong {
+				t.Skip("strong observations unavailable")
+			}
+			lookup := func() cacheledger.Result {
+				t.Helper()
+				result, hit, err := svc.ledger.Lookup(ctx, plan.ref, plan.variant)
+				require.NoError(t, err)
+				require.True(t, hit)
+				return result
+			}
+
+			data, err := svc.requestPreview(ctx, file, "small", "", 0, foreground)
+			require.NoError(t, err)
+			require.NotEmpty(t, data)
+			first := lookup()
+			require.Positive(t, first.GeneratedAt)
+			if foreground {
+				require.GreaterOrEqual(t, first.LastUsedAt, first.GeneratedAt)
+			} else {
+				require.Zero(t, first.LastUsedAt)
+				_, err = svc.requestPreview(ctx, file, "small", "", 0, false)
+				require.NoError(t, err)
+				require.Equal(t, first, lookup(), "a preheat hit still does not count as use")
+			}
+
+			decodes := svc.Stats().FullDecodes
+			got, err := svc.getPreviewForFile(ctx, file, "small", "", 0)
+			require.NoError(t, err)
+			require.Equal(t, data, got)
+			used := lookup()
+			require.GreaterOrEqual(t, used.LastUsedAt, first.GeneratedAt)
+			if foreground {
+				require.Equal(t, first.LastUsedAt, used.LastUsedAt)
+			}
+			_, err = svc.getPreviewForFile(ctx, file, "small", "", 0)
+			require.NoError(t, err)
+			require.Equal(t, used, lookup(), "recent foreground hits coalesce")
+			require.Equal(t, decodes, svc.Stats().FullDecodes)
+		})
+	}
+}
+
+func TestLedgerCanceledForegroundLeavesReadyResultUnused(t *testing.T) {
+	root := t.TempDir()
+	indexing.SetTestIndex("ledger-test", root)
+	t.Cleanup(indexing.ClearTestIndices)
+	svc := newAdmissionService(t, 1, 128)
+	svc.startLedger()
+	file := newNoisyFile(t, root, "cancel.jpg", 800, 600)
+	file.Source = "ledger-test"
+	plan, err := svc.planLedgerPreview(t.Context(), file, "small")
+	require.NoError(t, err)
+	if !plan.version.Strong {
+		t.Skip("strong observations unavailable")
+	}
+
+	entered, release := blockGeneration(svc)
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := svc.getPreviewForFile(ctx, file, "small", "", 0); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("foreground task did not enter generation")
+	}
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+	unblock()
+	require.NoError(t, svc.flights.wait(t.Context()))
+
+	result, hit, err := svc.ledger.Lookup(t.Context(), plan.ref, plan.variant)
+	require.NoError(t, err)
+	require.True(t, hit, "an admitted decode may finish after its waiter leaves")
+	require.Zero(t, result.LastUsedAt)
+}
+
+func TestLedgerStoreFailureDoesNotRecordUse(t *testing.T) {
+	root := t.TempDir()
+	indexing.SetTestIndex("ledger-test", root)
+	t.Cleanup(indexing.ClearTestIndices)
+	svc := newAdmissionService(t, 1, 128)
+	svc.startLedger()
+	file := newNoisyFile(t, root, "store-failure.jpg", 800, 600)
+	file.Source = "ledger-test"
+	plan, err := svc.planLedgerPreview(t.Context(), file, "small")
+	require.NoError(t, err)
+	if !plan.version.Strong {
+		t.Skip("strong observations unavailable")
+	}
+
+	svc.fileCache = failingStoreCache{inner: svc.fileCache}
+	data, err := svc.getPreviewForFile(t.Context(), file, "small", "", 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, data)
+	require.Equal(t, uint64(1), svc.Stats().StoreFailures)
+	_, hit, err := svc.ledger.Lookup(t.Context(), plan.ref, plan.variant)
+	require.NoError(t, err)
+	require.False(t, hit)
 }

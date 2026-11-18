@@ -145,7 +145,7 @@ func previewFileFromPaths(ctx context.Context, d *Context, location directoryPre
 		return nil, err
 	}
 	tempCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	_, previewErr := preview.GetPreviewForFile(tempCtx, *fileInfo, "small", "", 0)
+	previewErr := preview.WarmPreviewForFile(tempCtx, *fileInfo, "small", "", 0)
 	cancel()
 	if previewErr == nil {
 		return fileInfo, nil

@@ -32,7 +32,7 @@ def synthetic_png():
             + png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b""))
 
 
-def run(binary, result_dir, root, baseline=None, expected_commit=None):
+def run(binary, result_dir, root, baseline=None, expected_commit=None, expect_foreground_use=False):
     source = root / "source"
     originals = source / "A"
     originals.mkdir(parents=True)
@@ -74,7 +74,9 @@ def run(binary, result_dir, root, baseline=None, expected_commit=None):
     def ledger_rows():
         uri = (root / "cache" / "image-preview-ledger.sqlite").as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True) as database:
-            return database.execute("SELECT asset,variant,digest,generated_at FROM results").fetchall()
+            return database.execute(
+                "SELECT asset,variant,digest,generated_at,last_used_at FROM results"
+            ).fetchall()
 
     @contextmanager
     def server(program, phase):
@@ -128,6 +130,11 @@ def run(binary, result_dir, root, baseline=None, expected_commit=None):
             assert initial == legacy
         before = ledger_rows()
         assert len(before) == 1, "expected a generated PNG publication"
+        if expect_foreground_use:
+            generated_at, last_used_at = before[0][-2:]
+            assert last_used_at >= generated_at > 0, "first foreground delivery did not record use"
+            assert get_preview("/A/fixture.png") == (200, initial)
+            assert ledger_rows() == before, "repeated foreground use did not coalesce"
         move = {"action": "move", "items": [{
             "fromSource": "smoke", "fromPath": "/A/fixture.png",
             "toSource": "smoke", "toPath": "/B/fixture.png",
@@ -138,18 +145,19 @@ def run(binary, result_dir, root, baseline=None, expected_commit=None):
         assert (source / "B" / "fixture.png").exists()
         status, reread = get_preview("/B/fixture.png")
         assert status == 200 and reread == initial
-        assert ledger_rows() == before, "the move republished the thumbnail"
+        after_move = ledger_rows()
+        assert [row[:-1] for row in after_move] == [row[:-1] for row in before], "the move republished the thumbnail"
         print("Native HTTP smoke passed: embedded frontend, generated PNG and move reuse")
 
     if baseline:
         with server(baseline, "ab-return"):
             status, legacy_after = get_preview("/B/fixture.png")
             assert status == 200 and legacy_after == initial
-            assert ledger_rows() == before, "A/B modified the ledger"
+            assert ledger_rows() == after_move, "A/B modified the ledger"
         with server(binary, "c-return"):
             status, restored = get_preview("/B/fixture.png")
             assert status == 200 and restored == initial
-            assert ledger_rows() == before, "return to C republished the thumbnail"
+            assert [row[:-1] for row in ledger_rows()] == [row[:-1] for row in before], "return to C republished the thumbnail"
         print("Native A/B → C → A/B → C passed using the same files, index and cache")
 
 
@@ -161,10 +169,11 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--expected-commit")
+    parser.add_argument("--expect-foreground-use", action="store_true")
     args = parser.parse_args()
     artifact = args.binary.resolve(strict=True)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     baseline = args.baseline.resolve(strict=True) if args.baseline else None
     with tempfile.TemporaryDirectory(prefix="mument-007c-", dir=output) as temporary:
-        run(artifact, output, Path(temporary), baseline, args.expected_commit)
+        run(artifact, output, Path(temporary), baseline, args.expected_commit, args.expect_foreground_use)

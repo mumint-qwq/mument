@@ -168,7 +168,7 @@ func TestBudgetPermitReleaseIdempotent(t *testing.T) {
 
 func TestFlightCoalescesSameKey(t *testing.T) {
 	stats := newPreviewStats()
-	g := newFlightGroup(context.Background(), stats)
+	g := newFlightGroup[[]byte](context.Background(), stats)
 	defer g.close()
 
 	var calls atomic.Int64
@@ -222,7 +222,7 @@ func TestFlightCoalescesSameKey(t *testing.T) {
 }
 
 func TestFlightDifferentKeysRunSeparately(t *testing.T) {
-	g := newFlightGroup(context.Background(), newPreviewStats())
+	g := newFlightGroup[[]byte](context.Background(), newPreviewStats())
 	defer g.close()
 	var calls atomic.Int64
 	fn := func(ctx context.Context, markStarted func() bool) ([]byte, error) {
@@ -244,7 +244,7 @@ func TestFlightDifferentKeysRunSeparately(t *testing.T) {
 }
 
 func TestFlightPartialCancel(t *testing.T) {
-	g := newFlightGroup(context.Background(), newPreviewStats())
+	g := newFlightGroup[[]byte](context.Background(), newPreviewStats())
 	defer g.close()
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -281,7 +281,7 @@ func TestFlightPartialCancel(t *testing.T) {
 }
 
 func TestFlightLastWaiterQueuedCancelsTask(t *testing.T) {
-	g := newFlightGroup(context.Background(), newPreviewStats())
+	g := newFlightGroup[[]byte](context.Background(), newPreviewStats())
 	defer g.close()
 	started := make(chan struct{})
 	done := make(chan error, 1)
@@ -312,7 +312,7 @@ func TestFlightLastWaiterQueuedCancelsTask(t *testing.T) {
 
 func TestFlightLastWaiterRunningContinues(t *testing.T) {
 	stats := newPreviewStats()
-	g := newFlightGroup(context.Background(), stats)
+	g := newFlightGroup[[]byte](context.Background(), stats)
 	defer g.close()
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -355,7 +355,7 @@ func TestFlightLastWaiterRunningContinues(t *testing.T) {
 
 func TestFlightPanicAndRetry(t *testing.T) {
 	stats := newPreviewStats()
-	g := newFlightGroup(context.Background(), stats)
+	g := newFlightGroup[[]byte](context.Background(), stats)
 	defer g.close()
 	_, err := g.do(context.Background(), "panic", func(ctx context.Context, markStarted func() bool) ([]byte, error) {
 		markStarted()
@@ -374,7 +374,7 @@ func TestFlightPanicAndRetry(t *testing.T) {
 }
 
 func TestFlightFailureDoesNotPersist(t *testing.T) {
-	g := newFlightGroup(context.Background(), newPreviewStats())
+	g := newFlightGroup[[]byte](context.Background(), newPreviewStats())
 	defer g.close()
 	var calls atomic.Int64
 	fn := func(ctx context.Context, markStarted func() bool) ([]byte, error) {
@@ -392,7 +392,7 @@ func TestFlightFailureDoesNotPersist(t *testing.T) {
 }
 
 func TestFlightShutdownWaitsForStartedTask(t *testing.T) {
-	g := newFlightGroup(context.Background(), newPreviewStats())
+	g := newFlightGroup[[]byte](context.Background(), newPreviewStats())
 	started := make(chan struct{})
 	release := make(chan struct{})
 	fn := func(ctx context.Context, markStarted func() bool) ([]byte, error) {

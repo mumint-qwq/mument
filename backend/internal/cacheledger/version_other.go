@@ -1,4 +1,4 @@
-//go:build !linux || 386 || arm
+//go:build !linux || 386 || arm || cacheledger_portable
 
 // Added for mument 007-C.
 package cacheledger

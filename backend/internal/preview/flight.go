@@ -11,11 +11,11 @@ import (
 	"github.com/gtsteffaniak/go-logger/logger"
 )
 
-// flightGroup coalesces concurrent preview requests for the same cache key.
+// flightGroup coalesces concurrent preview requests for the same task key.
 // Only the leader executes fn; every waiter receives the same result.
 //
 // Bounds:
-//   - a new cache key consumes one task slot before its goroutine or header
+//   - a new key consumes one task slot before its goroutine or header
 //     read exists; saturation is rejected immediately with ErrPreviewSaturated;
 //   - requests for an existing key join without consuming another slot;
 //   - total HTTP waiters are capped separately because a same-key join still
@@ -29,9 +29,9 @@ import (
 //     admission reservation until the decode really returns, even if every
 //     waiter has gone. This prevents an immediate duplicate decode while the
 //     first one still holds memory.
-type flightGroup struct {
+type flightGroup[T any] struct {
 	mu           sync.Mutex
-	calls        map[string]*flightCall
+	calls        map[string]*flightCall[T]
 	stats        *previewStats
 	baseCtx      context.Context
 	wg           sync.WaitGroup
@@ -41,7 +41,7 @@ type flightGroup struct {
 	closed       bool
 }
 
-type flightCall struct {
+type flightCall[T any] struct {
 	key       string
 	done      chan struct{}
 	ctx       context.Context
@@ -50,17 +50,17 @@ type flightCall struct {
 	started   bool
 	finished  bool
 	entryHeld bool
-	data      []byte
+	data      T
 	err       error
 }
 
-func newFlightGroup(baseCtx context.Context, stats *previewStats, tasks ...*taskLimiter) *flightGroup {
+func newFlightGroup[T any](baseCtx context.Context, stats *previewStats, tasks ...*taskLimiter) *flightGroup[T] {
 	limiter := newTaskLimiter(maxPreviewTaskSlots, stats)
 	if len(tasks) > 0 && tasks[0] != nil {
 		limiter = tasks[0]
 	}
-	return &flightGroup{
-		calls:      make(map[string]*flightCall),
+	return &flightGroup[T]{
+		calls:      make(map[string]*flightCall[T]),
 		stats:      stats,
 		baseCtx:    baseCtx,
 		tasks:      limiter,
@@ -68,28 +68,29 @@ func newFlightGroup(baseCtx context.Context, stats *previewStats, tasks ...*task
 	}
 }
 
-func (g *flightGroup) do(ctx context.Context, key string, fn func(context.Context, func() bool) ([]byte, error)) ([]byte, error) {
+func (g *flightGroup[T]) do(ctx context.Context, key string, fn func(context.Context, func() bool) (T, error)) (T, error) {
+	var zero T
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return zero, err
 	}
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
-		return nil, ErrPreviewShuttingDown
+		return zero, ErrPreviewShuttingDown
 	}
 	if g.maxWaiters > 0 && g.totalWaiters >= g.maxWaiters {
 		g.mu.Unlock()
 		g.stats.waiterRejected.Add(1)
-		return nil, ErrPreviewSaturated
+		return zero, ErrPreviewSaturated
 	}
 	call := g.calls[key]
 	if call == nil {
 		if !g.tasks.tryAcquire() {
 			g.mu.Unlock()
-			return nil, ErrPreviewSaturated
+			return zero, ErrPreviewSaturated
 		}
 		taskCtx, cancel := context.WithCancel(g.baseCtx)
-		call = &flightCall{
+		call = &flightCall[T]{
 			key:       key,
 			done:      make(chan struct{}),
 			ctx:       taskCtx,
@@ -123,11 +124,11 @@ func (g *flightGroup) do(ctx context.Context, key string, fn func(context.Contex
 		g.mu.Unlock()
 		g.stats.canceledWaiters.Add(1)
 		g.leave(call)
-		return nil, ctx.Err()
+		return zero, ctx.Err()
 	}
 }
 
-func (g *flightGroup) run(call *flightCall, fn func(context.Context, func() bool) ([]byte, error)) {
+func (g *flightGroup[T]) run(call *flightCall[T], fn func(context.Context, func() bool) (T, error)) {
 	defer g.wg.Done()
 	defer func() {
 		if call.entryHeld {
@@ -149,7 +150,7 @@ func (g *flightGroup) run(call *flightCall, fn func(context.Context, func() bool
 		return true
 	}
 
-	var data []byte
+	var data T
 	var err error
 	func() {
 		defer func() {
@@ -179,7 +180,7 @@ func (g *flightGroup) run(call *flightCall, fn func(context.Context, func() bool
 	}
 }
 
-func (g *flightGroup) leave(call *flightCall) {
+func (g *flightGroup[T]) leave(call *flightCall[T]) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	call.waiters--
@@ -196,7 +197,7 @@ func (g *flightGroup) leave(call *flightCall) {
 	call.cancel()
 }
 
-func (g *flightGroup) close() {
+func (g *flightGroup[T]) close() {
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
@@ -209,7 +210,7 @@ func (g *flightGroup) close() {
 	g.mu.Unlock()
 }
 
-func (g *flightGroup) wait(ctx context.Context) error {
+func (g *flightGroup[T]) wait(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		g.wg.Wait()

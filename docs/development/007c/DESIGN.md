@@ -67,17 +67,31 @@ The key points to the existing disk cache. Ledger bytes are never deleted by
 `DelThumbs`. Original direct responses create no ready entry.
 
 A miss uses the existing A flight, estimate, admission and source descriptor.
-The flight key is asset and variant. The initial version must match the
-admitted descriptor. A complete before/after check includes ctime on strong
-platforms. Store precedes a short publication CAS. If a move superseded the
-source reference or a replacement created a new generation, the old result
-cannot become ready for the newer reference. A concurrent move may cause a
-source-changed response. For weak platforms, the request stays within the A
-budget and uses a transient key with no persistent result.
+A durable lookup uses the asset and variant as the task key. When the ledger
+is unavailable or the observation is weak, the task key uses the clean path,
+available stat fields and variant. It exists only while a task is in flight.
+Requests for that key share the task within the existing slot and waiter
+limits. Weak observations never publish or load persistent raster cache
+entries. Each weak waiter checks that its observed file still matches both
+the worker's descriptor and the current path. A replacement that reused the
+same size and mtime can therefore fail with source-changed and be retried.
+A weak platform cannot prove an in-place edit that preserves every available
+observation.
 
-Foreground use time has a one minute write interval per result. Lookup by
-itself does not update usage. The ledger hashes the generated thumbnail bytes
-for integrity. The move path does not read or hash originals.
+The initial version must match the admitted descriptor. The before/after
+check includes ctime on strong platforms. Store precedes a publication CAS
+against the reference and version. A move or replacement can supersede that
+reference. A concurrent move may cause a source-changed response.
+
+The shared worker carries the identity of a verified hit or a successful
+publication to each waiter. Only a successful foreground retrieval records
+use, with a separate CAS against both the active reference and the observed
+ready record. An abandoned decode can still finish and publish an unused
+result. Directory candidate probes, preheats, repository publication and
+recovery leave the foreground usage time alone. A recent hit skips the usage
+write altogether. The SQL cutoff coalesces racing updates to one mutation per
+minute per result. The ledger hashes generated thumbnail bytes for integrity.
+The move path does not read or hash originals.
 
 ## Move and B metadata
 

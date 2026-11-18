@@ -3,7 +3,6 @@ package preview
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +20,7 @@ type ledgerPreview struct {
 	path, key, variant string
 	version            cacheledger.Version
 	ref                cacheledger.Ref
+	weakInfo           os.FileInfo
 }
 
 func (s *Service) startLedger() {
@@ -158,14 +158,19 @@ func (s *Service) planLedgerPreview(ctx context.Context, file iteminfo.ExtendedF
 	v := cacheledger.FromFileInfo(info)
 	plan := &ledgerPreview{path: path, variant: variant, version: v}
 	uncached := func() (*ledgerPreview, error) {
-		if v.Strong {
-			plan.key = "c-uncached/" + cacheledger.Digest(fmt.Appendf(nil, "%q/%+v/%s", path, v, variant))
-		} else {
-			plan.key = "c-uncached/" + rand.Text()
-		}
+		// This identity lives only in the flight map. Weak stat fields can
+		// coalesce overlapping requests, but cannot address durable bytes.
+		plan.key = "c-uncached/" + cacheledger.Digest(fmt.Appendf(nil, "%q/%+v/%s", path, v, variant))
 		return plan, nil
 	}
-	if s.ledger == nil || !v.Strong {
+	if !v.Strong {
+		if err := verifyRequestedVersion(info, file); err != nil {
+			return nil, err
+		}
+		plan.weakInfo = info
+		return uncached()
+	}
+	if s.ledger == nil {
 		return uncached()
 	}
 
@@ -196,23 +201,24 @@ func (s *Service) planLedgerPreview(ctx context.Context, file iteminfo.ExtendedF
 	return plan, nil
 }
 
-func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledgerPreview) ([]byte, bool, error) {
+func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledgerPreview) (previewResult, bool, error) {
 	if plan == nil {
-		return s.loadCached(ctx, key)
+		data, found, err := s.loadCached(ctx, key)
+		return previewResult{data: data}, found, err
 	}
 	if plan.ref.Asset == "" {
-		return nil, false, nil
+		return previewResult{}, false, nil
 	}
 	result, found, err := s.ledger.Lookup(ctx, plan.ref, plan.variant)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, ctx.Err()
+			return previewResult{}, false, ctx.Err()
 		}
 		logger.Warningf("cannot look up image preview cache: %v", err)
-		return nil, false, nil
+		return previewResult{}, false, nil
 	}
 	if !found {
-		return nil, false, nil
+		return previewResult{}, false, nil
 	}
 	var data []byte
 	// A generated raster thumbnail is bounded by the largest enabled dimensions.
@@ -230,7 +236,7 @@ func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledger
 	}
 	if err != nil {
 		logger.Warningf("cannot read recorded image preview: %v", err)
-		return nil, false, nil
+		return previewResult{}, false, nil
 	}
 	if !found || !result.Matches(data) {
 		rejected, err := s.ledger.Reject(ctx, plan.ref, plan.variant, result)
@@ -240,30 +246,54 @@ func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledger
 		if rejected {
 			s.stats.cacheCorrupt.Add(1)
 		}
-		return nil, false, nil
+		return previewResult{}, false, nil
 	}
 	if version, err := cacheledger.Observe(plan.path); err != nil || version != plan.version {
-		return nil, false, ErrPreviewSourceChanged
+		return previewResult{}, false, ErrPreviewSourceChanged
 	}
-	if time.Since(time.Unix(0, result.LastUsedAt)) >= time.Minute {
-		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, time.Now()); err != nil && ctx.Err() == nil {
+	return previewResult{data: data, ready: result}, true, nil
+}
+
+func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool) (cacheledger.Result, error) {
+	if plan == nil {
+		return cacheledger.Result{}, s.fileCache.Store(ctx, key, data)
+	}
+	if original || plan.ref.Asset == "" {
+		return cacheledger.Result{}, nil
+	}
+	if err := s.fileCache.Store(ctx, key, data); err != nil {
+		return cacheledger.Result{}, err
+	}
+	return s.ledger.Publish(ctx, plan.ref, plan.variant, key, data)
+}
+
+func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, result previewResult, foreground bool) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if plan != nil && plan.weakInfo != nil {
+		// A replacement may have reused the same size and mtime. Each
+		// waiter must match both the task's descriptor and the live path.
+		if err := verifySourceUnchanged(plan.weakInfo, result.weakInfo); err != nil {
+			s.stats.sourceChanged.Add(1)
+			return nil, err
+		}
+		current, err := statSourceVersion(plan.path)
+		if err != nil {
+			s.stats.sourceChanged.Add(1)
+			return nil, err
+		}
+		if err := verifySourceUnchanged(result.weakInfo, current); err != nil {
+			s.stats.sourceChanged.Add(1)
+			return nil, err
+		}
+	}
+	if foreground && result.ready.Key != "" {
+		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, result.ready, time.Now()); err != nil && ctx.Err() == nil {
 			logger.Warningf("cannot record image preview use: %v", err)
 		}
 	}
-	return data, true, nil
-}
-
-func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool) error {
-	if plan == nil {
-		return s.fileCache.Store(ctx, key, data)
-	}
-	if original || plan.ref.Asset == "" {
-		return nil
-	}
-	if err := s.fileCache.Store(ctx, key, data); err != nil {
-		return err
-	}
-	return s.ledger.Publish(ctx, plan.ref, plan.variant, key, data)
+	return result.data, nil
 }
 
 // MoveLedger is available to the authorized filesystem adapter. Its lifetime

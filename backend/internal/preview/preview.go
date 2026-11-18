@@ -55,7 +55,7 @@ type Service struct {
 	ffmpegService  *ffmpeg.FFmpegService // Shared FFmpeg service for video and HEIC/JPEG fallback
 
 	budget     *resourceBudget
-	flights    *flightGroup
+	flights    *flightGroup[previewResult]
 	tasks      *taskLimiter
 	headerSem  chan struct{}
 	stats      *previewStats
@@ -142,7 +142,7 @@ func NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cacheDi
 		baseCtx:       baseCtx,
 		baseCancel:    baseCancel,
 	}
-	svc.flights = newFlightGroup(baseCtx, stats, taskLimit)
+	svc.flights = newFlightGroup[previewResult](baseCtx, stats, taskLimit)
 	go svc.sampleLoop(baseCtx)
 
 	settings.Env.MuPdfAvailable = docEnabled()
@@ -233,7 +233,26 @@ func GetPreviewForFile(ctx context.Context, file iteminfo.ExtendedFileInfo, prev
 	return service.getPreviewForFile(ctx, file, previewSize, url, seekPercentage)
 }
 
+// WarmPreviewForFile checks or generates a preview without marking it as used.
+func WarmPreviewForFile(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, url string, seekPercentage int) error {
+	if service == nil {
+		return ErrPreviewUnavailable
+	}
+	_, err := service.requestPreview(ctx, file, previewSize, url, seekPercentage, false)
+	return err
+}
+
+type previewResult struct {
+	data     []byte
+	ready    cacheledger.Result
+	weakInfo os.FileInfo
+}
+
 func (s *Service) getPreviewForFile(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, url string, seekPercentage int) ([]byte, error) {
+	return s.requestPreview(ctx, file, previewSize, url, seekPercentage, true)
+}
+
+func (s *Service) requestPreview(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, url string, seekPercentage int, foreground bool) ([]byte, error) {
 	if !file.HasPreview {
 		return nil, ErrUnsupportedMedia
 	}
@@ -250,25 +269,29 @@ func (s *Service) getPreviewForFile(ctx context.Context, file iteminfo.ExtendedF
 		cacheKey = publication.key
 	}
 
-	if data, found, err := s.loadPreviewCache(ctx, cacheKey, publication); err != nil {
+	if result, found, err := s.loadPreviewCache(ctx, cacheKey, publication); err != nil {
 		return nil, fmt.Errorf("failed to load from cache: %w", err)
 	} else if found {
 		s.stats.cacheHits.Add(1)
-		return data, nil
+		return s.deliverPreview(ctx, publication, result, foreground)
 	}
 	s.stats.cacheMisses.Add(1)
 
-	return s.flights.do(ctx, cacheKey, func(taskCtx context.Context, markStarted func() bool) ([]byte, error) {
+	result, err := s.flights.do(ctx, cacheKey, func(taskCtx context.Context, markStarted func() bool) (previewResult, error) {
 		// Double-check after becoming the leader: a previous task may have
 		// published between the hit check and the flight registration.
-		if data, found, err := s.loadPreviewCache(taskCtx, cacheKey, publication); err != nil {
-			return nil, err
+		if result, found, err := s.loadPreviewCache(taskCtx, cacheKey, publication); err != nil {
+			return previewResult{}, err
 		} else if found {
 			s.stats.cacheHits.Add(1)
-			return data, nil
+			return result, nil
 		}
 		return s.generateAndPublish(taskCtx, file, previewSize, url, seekPercentage, cacheHash, cacheKey, markStarted, publication)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return s.deliverPreview(ctx, publication, result, foreground)
 }
 
 func (s *Service) loadCached(ctx context.Context, cacheKey string) ([]byte, bool, error) {
@@ -293,15 +316,15 @@ func (s *Service) loadCached(ctx context.Context, cacheKey string) ([]byte, bool
 // generateAndPublish is the only path that opens the source for preview work.
 // It reserves memory, verifies the source version, generates, verifies again,
 // and atomically publishes the result.
-func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int, fileMD5, cacheKey string, markStarted func() bool, publication *ledgerPreview) ([]byte, error) {
+func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int, fileMD5, cacheKey string, markStarted func() bool, publication *ledgerPreview) (previewResult, error) {
 	if fileMD5 == "" {
-		return nil, fmt.Errorf("preview cache hash is empty")
+		return previewResult{}, fmt.Errorf("preview cache hash is empty")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return previewResult{}, err
 	}
 	if s.closed.Load() {
-		return nil, ErrPreviewShuttingDown
+		return previewResult{}, ErrPreviewShuttingDown
 	}
 
 	estimate, err := s.estimateGeneration(ctx, file, previewSize)
@@ -309,16 +332,16 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 		if errors.Is(err, ErrPreviewHeaderInvalid) || errors.Is(err, ErrPreviewDimensionsTooLarge) {
 			s.stats.headerRejected.Add(1)
 		}
-		return nil, err
+		return previewResult{}, err
 	}
 
 	permit, err := s.budget.acquire(ctx, estimate.Bytes)
 	if err != nil {
-		return nil, err
+		return previewResult{}, err
 	}
 	defer permit.release()
 	if s.closed.Load() {
-		return nil, ErrPreviewShuttingDown
+		return previewResult{}, ErrPreviewShuttingDown
 	}
 
 	workStarted := false
@@ -333,17 +356,17 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	}()
 
 	if markStarted != nil && !markStarted() {
-		return nil, context.Canceled
+		return previewResult{}, context.Canceled
 	}
 
 	// A concurrent flight for the same key cannot exist, but a direct
 	// GeneratePreviewWithMD5 caller or a just-finished task may have published
 	// while this task waited for admission.
-	if data, found, err := s.loadPreviewCache(ctx, cacheKey, publication); err != nil {
-		return nil, err
+	if result, found, err := s.loadPreviewCache(ctx, cacheKey, publication); err != nil {
+		return previewResult{}, err
 	} else if found {
 		s.stats.cacheHits.Add(1)
-		return data, nil
+		return result, nil
 	}
 
 	// Reopen only after admission. The descriptor is checked against the
@@ -354,20 +377,26 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	sourceFile, err := openBoundSource(ctx, file.RealPath, sourceBindingFromEstimate(estimate))
 	if err != nil {
 		s.stats.sourceChanged.Add(1)
-		return nil, err
+		return previewResult{}, err
 	}
 	defer sourceFile.Close()
 	before, err := sourceFile.Stat()
 	if err != nil {
 		s.stats.sourceChanged.Add(1)
-		return nil, fmt.Errorf("%w: %v", ErrPreviewSourceChanged, err)
+		return previewResult{}, fmt.Errorf("%w: %v", ErrPreviewSourceChanged, err)
 	}
 	if err := verifyRequestedVersion(before, file); err != nil {
-		return nil, err
+		return previewResult{}, err
 	}
 
 	if publication != nil && cacheledger.FromFileInfo(before) != publication.version {
-		return nil, ErrPreviewSourceChanged
+		return previewResult{}, ErrPreviewSourceChanged
+	}
+	if publication != nil && publication.weakInfo != nil {
+		if err := verifySourceUnchanged(publication.weakInfo, before); err != nil {
+			s.stats.sourceChanged.Add(1)
+			return previewResult{}, err
+		}
 	}
 	workStarted = true
 	start := time.Now()
@@ -377,7 +406,7 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	var original bool
 	data, err := s.generatePreviewLocked(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, cacheKey, sourceFile, &original)
 	if err != nil {
-		return nil, err
+		return previewResult{}, err
 	}
 	if s.testHooks != nil && s.testHooks.afterGenerate != nil {
 		s.testHooks.afterGenerate()
@@ -385,26 +414,27 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	after, err := sourceFile.Stat()
 	if err != nil {
 		s.stats.sourceChanged.Add(1)
-		return nil, fmt.Errorf("%w: %v", ErrPreviewSourceChanged, err)
+		return previewResult{}, fmt.Errorf("%w: %v", ErrPreviewSourceChanged, err)
 	}
 	if err := verifySourceUnchanged(before, after); err != nil {
 		s.stats.sourceChanged.Add(1)
-		return nil, err
+		return previewResult{}, err
 	}
 	// A rename can replace the pathname while the already-open descriptor still
 	// points at the old inode. Reject publication in that case too.
 	pathAfter, err := statSourceVersion(file.RealPath)
 	if err != nil {
 		s.stats.sourceChanged.Add(1)
-		return nil, err
+		return previewResult{}, err
 	}
 	if err := verifySourceUnchanged(before, pathAfter); err != nil {
 		s.stats.sourceChanged.Add(1)
-		return nil, err
+		return previewResult{}, err
 	}
 
 	publishStart := time.Now()
-	if err := s.publishPreviewCache(ctx, cacheKey, publication, data, original); err != nil {
+	ready, err := s.publishPreviewCache(ctx, cacheKey, publication, data, original)
+	if err != nil {
 		// The generated bytes are valid and are still returned; the miss is
 		// visible in logs/counters and the next request retries the store. A
 		// cache failure must not pretend the result was published.
@@ -414,7 +444,11 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	s.stats.generatedBytes.Add(uint64(len(data)))
 	s.stats.publishNanos.Add(uint64(time.Since(publishStart).Nanoseconds()))
 	s.stats.generateNanos.Add(uint64(time.Since(start).Nanoseconds()))
-	return data, nil
+	result := previewResult{data: data, ready: ready}
+	if publication != nil && publication.weakInfo != nil {
+		result.weakInfo = after
+	}
+	return result, nil
 }
 
 func statSourceVersion(path string) (os.FileInfo, error) {
@@ -837,7 +871,8 @@ func GeneratePreviewWithMD5(ctx context.Context, file iteminfo.ExtendedFileInfo,
 		return nil, ErrPreviewSaturated
 	}
 	defer service.tasks.release()
-	return service.generateAndPublish(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, CacheKey(fileMD5, previewSize, seekPercentage), nil, nil)
+	result, err := service.generateAndPublish(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, CacheKey(fileMD5, previewSize, seekPercentage), nil, nil)
+	return result.data, err
 }
 
 func GeneratePreview(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int) ([]byte, error) {

@@ -297,7 +297,7 @@ func TestCanceledHeadWakesEligibleTail(t *testing.T) {
 func TestCompletedFlightCancelsTaskContext(t *testing.T) {
 	base, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	group := newFlightGroup(base, newPreviewStats())
+	group := newFlightGroup[[]byte](base, newPreviewStats())
 	var taskCtx context.Context
 	_, err := group.do(context.Background(), "ctx-key", func(ctx context.Context, _ func() bool) ([]byte, error) {
 		taskCtx = ctx
