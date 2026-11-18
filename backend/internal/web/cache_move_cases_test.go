@@ -8,12 +8,19 @@ import (
 	"encoding/binary"
 	"image/jpeg"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/files"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	indexsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/database/users"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
 	"github.com/stretchr/testify/require"
 )
@@ -200,9 +207,10 @@ func TestLedgerCopyFallbackDoesNotTransfer(t *testing.T) {
 	require.NoError(t, err)
 	source := readMovePreview(t, env, server, from, "small")
 	require.NotEqual(t, source, readMovePreview(t, env, server, to, "small"))
-	parent := filepath.Dir(targetPath)
-	require.NoError(t, os.Chmod(parent, 0o555))
-	t.Cleanup(func() { require.NoError(t, os.Chmod(parent, 0o755)) })
+	for _, dir := range []string{filepath.Dir(sourcePath), filepath.Dir(targetPath)} {
+		require.NoError(t, os.Chmod(dir, 0o555))
+		t.Cleanup(func() { require.NoError(t, os.Chmod(dir, 0o755)) })
+	}
 	// The destination file can be truncated; its directory cannot be renamed
 	// into. This exercises the same-device fallback through the real handler.
 	result := env.patch("move", []map[string]string{moveItem("src", from, "src", to)})
@@ -214,4 +222,63 @@ func TestLedgerCopyFallbackDoesNotTransfer(t *testing.T) {
 	rereadBefore := preview.GetService().Stats().FullDecodes
 	require.Equal(t, source, readMovePreview(t, env, server, to, "small"))
 	require.Equal(t, rereadBefore+1, preview.GetService().Stats().FullDecodes)
+	require.True(t, env.exists("src", from), "the source can remain when async deletion cannot proceed")
+	require.Equal(t, source, readMovePreview(t, env, server, from, "small"))
+	require.Equal(t, rereadBefore+1, preview.GetService().Stats().FullDecodes)
+}
+
+func TestLedgerCrossDeviceMove(t *testing.T) {
+	env := newMoveIndexEnv(t, "src", "dst")
+	server := ledgerPreviewServer(t, env)
+	deviceRoot, err := os.MkdirTemp("/dev/shm", "mument-007c-")
+	if err != nil {
+		t.Skipf("second test filesystem unavailable: %v", err)
+	}
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(deviceRoot)) })
+	srcDevice, err := cacheledger.Observe(env.paths["src"])
+	require.NoError(t, err)
+	dstDevice, err := cacheledger.Observe(deviceRoot)
+	require.NoError(t, err)
+	if srcDevice.Dev == dstDevice.Dev {
+		t.Skip("test source and target use the same device")
+	}
+	indexing.SetTestIndexWithDB("test-cross-device", deviceRoot, env.db)
+	file := "/source.jpg"
+	from := env.path("src", file)
+	to := filepath.Join(deviceRoot, "target.jpg")
+	writeMoveImage(t, from, 372)
+	warm := readMovePreview(t, env, server, file, "small")
+	require.NoError(t, files.MoveResource(false, "src", "test-cross-device", from, to))
+	env.waitIdle()
+	stat, err := os.Stat(to)
+	require.NoError(t, err)
+	moved := iteminfo.ExtendedFileInfo{FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{
+		Name: filepath.Base(to), Size: stat.Size(), ModTime: stat.ModTime(), Type: "image/jpeg", HasPreview: true,
+	}}, Source: "test-cross-device", RealPath: to}
+	before := preview.GetService().Stats().FullDecodes
+	data, err := preview.GetPreviewForFile(t.Context(), moved, "small", "", 0)
+	require.NoError(t, err)
+	require.Equal(t, warm, data)
+	require.Equal(t, before+1, preview.GetService().Stats().FullDecodes)
+	require.Eventually(t, func() bool { _, err := os.Stat(from); return os.IsNotExist(err) }, time.Second, 10*time.Millisecond)
+}
+
+func TestLedgerWarmCacheStillChecksSourcePermissions(t *testing.T) {
+	env := newMoveIndexEnv(t, "src")
+	server := ledgerPreviewServer(t, env)
+	env.mkdir("src", "A")
+	writeMoveImage(t, env.path("src", "A/fixture.jpg"), 987)
+	require.NotEmpty(t, readMovePreview(t, env, server, "/A/fixture.jpg", "small"))
+	denied := *env.user
+	denied.BackendScopes = []users.BackendScope{{Path: env.paths["src"], Scope: "/A/", Permissions: users.SourceFilePermissions{}}}
+	denied.BackendSourcePermissions = map[string]users.SourceFilePermissions{env.paths["src"]: {}}
+	before := preview.GetService().Stats()
+	target := url.Values{"source": {"src"}, "path": {"/fixture.jpg"}, "size": {"small"}}
+	r := httptest.NewRequest(http.MethodGet, "/api/resources/preview?"+target.Encode(), nil)
+	status, err := previewHandler(httptest.NewRecorder(), r, &Context{User: &denied})
+	require.Error(t, err)
+	require.Equal(t, http.StatusForbidden, status)
+	after := preview.GetService().Stats()
+	require.Equal(t, before.FullDecodes, after.FullDecodes)
+	require.Equal(t, before.CacheHits, after.CacheHits)
 }

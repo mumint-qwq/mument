@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
@@ -139,4 +140,20 @@ func TestLedgerGenerationInterruptedByRename(t *testing.T) {
 	bytes, err := svc.getPreviewForFile(t.Context(), file, "small", "", 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, bytes)
+}
+
+func TestLedgerShutdownWhileRecoveryWaitsForLocationGate(t *testing.T) {
+	svc := newAdmissionService(t, 1, 128)
+	svc.startLedger()
+	require.NotNil(t, svc.ledger)
+	unlock, err := svc.ledger.LockLocations(t.Context())
+	require.NoError(t, err)
+	defer unlock()
+	svc.ledger.RequestRecovery()
+	require.Eventually(t, func() bool { return len(svc.ledger.RecoveryRequested()) == 0 }, time.Second, time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	require.NoError(t, svc.Shutdown(ctx))
+	_, err = svc.ledger.RecoveryCutoff(ctx)
+	require.Error(t, err)
 }

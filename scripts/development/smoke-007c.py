@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Exercise a built mument binary against temporary files on loopback."""
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import random
+import re
 import signal
 import socket
 import sqlite3
 import struct
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.error
@@ -31,7 +32,7 @@ def synthetic_png():
             + png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b""))
 
 
-def run(binary, result_dir, root):
+def run(binary, result_dir, root, baseline=None, expected_commit=None):
     source = root / "source"
     originals = source / "A"
     originals.mkdir(parents=True)
@@ -73,58 +74,97 @@ def run(binary, result_dir, root):
     def ledger_rows():
         uri = (root / "cache" / "image-preview-ledger.sqlite").as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True) as database:
-            return database.execute("SELECT asset,variant,digest FROM results").fetchall()
+            return database.execute("SELECT asset,variant,digest,generated_at FROM results").fetchall()
 
-    with (result_dir / "native-server.log").open("wb") as log:
-        proc = subprocess.Popen([str(binary), "--config", str(config_file), "--no-input"],
-                                cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env)
-        try:
-            until = time.monotonic() + 30
-            while time.monotonic() < until:
-                if proc.poll() is not None:
-                    raise RuntimeError("native smoke process exited before health check")
-                try:
-                    if request("/health")[0] == 200:
-                        break
-                except urllib.error.URLError:
-                    time.sleep(0.1)
-            else:
-                raise TimeoutError("native smoke health check timed out")
+    @contextmanager
+    def server(program, phase):
+        with (result_dir / f"native-{phase}-server.log").open("wb") as log:
+            proc = subprocess.Popen([str(program), "--config", str(config_file), "--no-input"],
+                                    cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env)
+            try:
+                until = time.monotonic() + 30
+                while time.monotonic() < until:
+                    if proc.poll() is not None:
+                        raise RuntimeError(f"{phase} process exited before health check")
+                    try:
+                        if request("/health")[0] == 200:
+                            break
+                    except urllib.error.URLError:
+                        time.sleep(0.1)
+                else:
+                    raise TimeoutError(f"{phase} health check timed out")
+                yield
+            finally:
+                if proc.poll() is None:
+                    proc.send_signal(signal.SIGTERM)
+                    try:
+                        status = proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                        raise
+                    if status != 0:
+                        raise RuntimeError(f"{phase} server shutdown exited {status}")
 
-            status, html = request("/")
-            assert status == 200 and b"/assets/" in html, "embedded frontend HTML missing"
-            status, initial = get_preview("/A/fixture.png")
-            assert status == 200 and initial.startswith(b"\x89PNG")
-            before = ledger_rows()
-            assert len(before) == 1, "expected a generated PNG publication"
-            move = {"action": "move", "items": [{
-                "fromSource": "smoke", "fromPath": "/A/fixture.png",
-                "toSource": "smoke", "toPath": "/B/fixture.png",
-            }]}
-            status, moved = request("/api/resources", "PATCH", json.dumps(move).encode())
-            assert status == 200 and len(json.loads(moved)["succeeded"]) == 1
-            assert not (originals / "fixture.png").exists()
-            assert (source / "B" / "fixture.png").exists()
-            status, reread = get_preview("/B/fixture.png")
-            assert status == 200 and reread == initial
-            assert ledger_rows() == before, "the move published a second result"
-            print("Native HTTP smoke passed: embedded frontend, generated PNG and move reuse")
-        finally:
-            if proc.poll() is None:
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    status = proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    raise
-                if status != 0:
-                    raise RuntimeError(f"native server shutdown exited {status}")
+    if baseline:
+        with server(baseline, "ab-first"):
+            status, legacy = get_preview("/A/fixture.png")
+            assert status == 200 and legacy.startswith(b"\x89PNG")
+            assert not (root / "cache" / "image-preview-ledger.sqlite").exists()
+
+    with server(binary, "c-first"):
+        status, html = request("/")
+        assert status == 200 and b"/assets/" in html, "embedded frontend HTML missing"
+        if expected_commit:
+            marker = f'name="quantum-source-commit" content="{expected_commit}"'.encode()
+            assert marker in html, "served source marker does not match the candidate"
+        asset = re.search(rb'<script[^>]+src="(/[^"]+/assets/[^"]+\.js)"', html)
+        assert asset, "compiled JS entry missing from served HTML"
+        status, bundle = request(asset[1].decode())
+        assert status == 200 and len(bundle) > 100, "embedded JS request failed"
+        status, initial = get_preview("/A/fixture.png")
+        assert status == 200 and initial.startswith(b"\x89PNG")
+        if baseline:
+            assert initial == legacy
+        before = ledger_rows()
+        assert len(before) == 1, "expected a generated PNG publication"
+        move = {"action": "move", "items": [{
+            "fromSource": "smoke", "fromPath": "/A/fixture.png",
+            "toSource": "smoke", "toPath": "/B/fixture.png",
+        }]}
+        status, moved = request("/api/resources", "PATCH", json.dumps(move).encode())
+        assert status == 200 and len(json.loads(moved)["succeeded"]) == 1
+        assert not (originals / "fixture.png").exists()
+        assert (source / "B" / "fixture.png").exists()
+        status, reread = get_preview("/B/fixture.png")
+        assert status == 200 and reread == initial
+        assert ledger_rows() == before, "the move republished the thumbnail"
+        print("Native HTTP smoke passed: embedded frontend, generated PNG and move reuse")
+
+    if baseline:
+        with server(baseline, "ab-return"):
+            status, legacy_after = get_preview("/B/fixture.png")
+            assert status == 200 and legacy_after == initial
+            assert ledger_rows() == before, "A/B modified the ledger"
+        with server(binary, "c-return"):
+            status, restored = get_preview("/B/fixture.png")
+            assert status == 200 and restored == initial
+            assert ledger_rows() == before, "return to C republished the thumbnail"
+        print("Native A/B → C → A/B → C passed using the same files, index and cache")
 
 
 if __name__ == "__main__":
-    artifact = Path(sys.argv[1]).resolve(strict=True)
-    output = Path(sys.argv[2]).resolve()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("binary", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--expected-commit")
+    args = parser.parse_args()
+    artifact = args.binary.resolve(strict=True)
+    output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    baseline = args.baseline.resolve(strict=True) if args.baseline else None
     with tempfile.TemporaryDirectory(prefix="mument-007c-", dir=output) as temporary:
-        run(artifact, output, Path(temporary))
+        run(artifact, output, Path(temporary), baseline, args.expected_commit)
