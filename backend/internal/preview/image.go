@@ -1,3 +1,5 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package preview
 
 import (
@@ -14,7 +16,7 @@ import (
 )
 
 // configureImagingParallelism limits kovidgoyal/imaging to one thread per resize.
-// Concurrent preview jobs are capped separately by imageSem (like OG filebrowser).
+// Concurrent preview jobs are capped by the shared resourceBudget in preview.go.
 func configureImagingParallelism() {
 	imaging.SetMaxProcs(1)
 }
@@ -183,10 +185,12 @@ func (s *Service) Resize(ctx context.Context, in io.Reader, out io.Writer, opts 
 	return s.ResizeWithSize(ctx, in, out, 0, opts)
 }
 
-// ResizeWithSize resizes an image with file size information for appropriate semaphore selection.
-// Resize runs synchronously so the image semaphore accurately bounds concurrent CPU work.
-// A detached goroutine would return on ctx cancellation while still decoding/resizing,
-// defeating the semaphore and piling up orphaned work that causes preview timeouts under load.
+// ResizeWithSize resizes synchronously. Preview generation acquires the shared
+// resource budget in generateAndPublish before calling this; ResizeWithSize
+// itself does not admit work (PWA icon generation calls Resize directly at
+// startup, on a small built-in favicon). Keeping the decode synchronous means a
+// canceled caller cannot return while an admitted task still decodes: the task
+// releases its reservation only after this function returns.
 func (s *Service) ResizeWithSize(ctx context.Context, in io.Reader, out io.Writer, fileSize int64, opts ResizeOptions) error {
 	if ctx.Err() != nil {
 		return ctx.Err()

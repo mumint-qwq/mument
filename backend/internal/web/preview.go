@@ -232,7 +232,11 @@ func PreviewHelperFunc(w http.ResponseWriter, r *http.Request, d *Context) (int,
 			officeUrl = scheme + "://" + r.Host + pathUrl
 		}
 	}
-	previewImg, err := preview.GetPreviewForFile(ctx, d.FileInfo, previewSize, officeUrl, seekPercentage)
+	file := d.FileInfo
+	if d.Share.Hash != "" {
+		file.Source = d.Share.GetSourceName()
+	}
+	previewImg, err := preview.GetPreviewForFile(ctx, file, previewSize, officeUrl, seekPercentage)
 	if err != nil {
 		// Check if it was a context cancellation (client navigated away)
 		if isClientCancellation(ctx, err) {
@@ -250,7 +254,7 @@ func PreviewHelperFunc(w http.ResponseWriter, r *http.Request, d *Context) (int,
 		logger.Errorf("Preview generation failed for file '%s' (type: %s, size: %s, seek: %d%%): %v",
 			d.FileInfo.Name, d.FileInfo.Type, previewSize, seekPercentage, err)
 
-		return http.StatusInternalServerError, err
+		return ErrToStatus(err), err
 	}
 	w.Header().Set("Cache-Control", "private")
 	w.Header().Set("Content-Type", "image/jpeg")

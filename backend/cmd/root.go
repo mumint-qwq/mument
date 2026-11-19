@@ -210,13 +210,26 @@ func StartFilebrowser() {
 				httpResult.Drained, busy)
 		}
 	}
+	// Preview tasks may still hold decode memory after HTTP handlers drained.
+	// Cancel queued work and wait for active generation to leave the budget
+	// before the cache directory can be cleared on shutdown.
+	previewStopped := false
+	if httpResult.Drained {
+		previewCtx, cancelPreview := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := preview.Shutdown(previewCtx); err != nil {
+			logger.Warningf("preview shutdown did not complete: %v", err)
+		} else {
+			previewStopped = true
+		}
+		cancelPreview()
+	}
 	if settings.Config.Server.CacheDirCleanup {
-		if canCloseDependencies {
+		if canCloseDependencies && previewStopped {
 			logger.Debugf("clearing cache dir: %s", settings.Config.Server.CacheDir)
 			fileutils.ClearCacheDir(settings.Config.Server.CacheDir)
 		} else {
-			logger.Warningf("skipping cache cleanup (handlers_drained=%v maintenance_busy=%v)",
-				httpResult.Drained, busy)
+			logger.Warningf("skipping cache cleanup (handlers_drained=%v maintenance_busy=%v preview_stopped=%v)",
+				httpResult.Drained, busy, previewStopped)
 		}
 	}
 	if canCloseDependencies {
@@ -248,8 +261,8 @@ func rootCMD(ctx context.Context, serverConfig *settings.Server, a *app.App, shu
 		fileutils.InitAssetFS(nil, false)
 	}
 
-	// Start preview service
-	err := preview.StartPreviewGenerator(numWorkers, cacheDir)
+	// Start preview service with the shared memory budget.
+	err := preview.StartPreviewGeneratorWithBudget(numWorkers, settings.Config.Server.PreviewMemoryBudgetMB, cacheDir)
 	if err != nil {
 		logger.Fatalf("Error starting preview service: %v", err)
 	}

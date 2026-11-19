@@ -1,46 +1,38 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package indexing
 
 import (
 	"context"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
-	"math"
 	"os"
 	"strings"
 
-	"github.com/gtsteffaniak/filebrowser/backend/internal/imagemeta"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
 
-// readDisplayAspectRatio reads image headers only. Unsupported containers return
-// zero so the browser can retain its existing decode-and-cache fallback.
+// readDisplayAspectRatio is retained for callers that only need a best-effort
+// ratio. It now uses the same bounded, version-checked header reader as the
+// indexer; scanner paths queue work instead of calling this synchronously.
 func readDisplayAspectRatio(realPath, mimeType string) float64 {
 	if !strings.HasPrefix(mimeType, "image/") || realPath == "" {
 		return 0
 	}
-	f, err := os.Open(realPath)
+	info, err := os.Stat(realPath)
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
-	cfg, _, err := image.DecodeConfig(f)
-	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+	result := readImageHeader(context.Background(), realPath, versionFromFileInfo(info, realPath))
+	if result.State != iteminfo.ImageMetaReady {
 		return 0
 	}
-
-	width, height := cfg.Width, cfg.Height
-	if orientationSwapsDimensions(imagemeta.GetOrientationFromFile(context.Background(), realPath, f)) {
-		width, height = height, width
-	}
-	ratio := float64(width) / float64(height)
-	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
-		return 0
-	}
-	return ratio
+	return result.Ratio
 }
 
 func orientationSwapsDimensions(orientation string) bool {

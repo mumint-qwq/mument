@@ -1,3 +1,5 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package indexing
 
 import (
@@ -5,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	indexingdb "github.com/gtsteffaniak/filebrowser/backend/internal/database/dbindex"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/events"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	"github.com/gtsteffaniak/go-logger/logger"
 )
 
@@ -324,8 +326,14 @@ func (idx *Index) setupMultiScanner(isNewDb bool) {
 		idx.mu.Unlock()
 	}
 
+	if idx.db != nil && idx.db.ImageBackfillPending() {
+		idx.mu.Lock()
+		idx.schedulerStartupPassPending = true
+		idx.mu.Unlock()
+	}
 	idx.restoreScannerNextRuns()
 	go idx.runIndexScheduler()
+	go idx.runImageMetadataBackfill()
 
 	logger.Debugf("Created %d scanners for [%v] (1 root + %d children)", len(topLevelDirs)+1, idx.Name, len(topLevelDirs))
 }

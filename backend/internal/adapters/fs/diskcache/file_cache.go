@@ -1,3 +1,5 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package diskcache
 
 import (
@@ -89,20 +91,55 @@ func migrateOldCacheStructure(oldDir, newDir string) error {
 	return nil
 }
 
+// Store publishes a cache value atomically: the bytes are written and synced to
+// a temporary file in the same directory, then renamed over the final name.
+// Readers therefore see either the previous complete value or the new complete
+// value, never a partially written preview. A failed write removes its own
+// temporary file and leaves any existing usable value untouched.
 func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 	mu := f.getScopedLocks(key)
 	mu.Lock()
 	defer mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	fileName := f.getFileName(key)
-	if err := os.MkdirAll(filepath.Dir(fileName), fileutils.PermDir); err != nil {
+	dir := filepath.Dir(fileName)
+	if err := os.MkdirAll(dir, fileutils.PermDir); err != nil {
 		return err
 	}
 
-	if err := os.WriteFile(fileName, value, fileutils.PermFile); err != nil {
+	tmp, err := os.CreateTemp(dir, ".preview-*")
+	if err != nil {
 		return err
 	}
-
+	tmpName := tmp.Name()
+	removeTemp := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+	if _, err := tmp.Write(value); err != nil {
+		removeTemp()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		removeTemp()
+		return err
+	}
+	if err := tmp.Chmod(fileutils.PermFile); err != nil {
+		removeTemp()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, fileName); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
 	return nil
 }
 
@@ -118,6 +155,28 @@ func (f *FileCache) Load(ctx context.Context, key string) (value []byte, exist b
 		return nil, false, err
 	}
 	return value, true, nil
+}
+
+// LoadSized bounds reads for ledger results. A size mismatch returns no bytes
+// with exist=true so the caller can invalidate its publication record.
+func (f *FileCache) LoadSized(ctx context.Context, key string, size int64) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	r, ok, err := f.open(key)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	defer r.Close()
+	info, err := r.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() != size {
+		return nil, true, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, size+1))
+	return data, err == nil, err
 }
 
 func (f *FileCache) Delete(ctx context.Context, key string) error {

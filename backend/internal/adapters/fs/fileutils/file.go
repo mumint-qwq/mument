@@ -59,21 +59,22 @@ func unixModeToFileMode(u uint32) os.FileMode {
 // By default, the rename system call is used. If src and dst point to different volumes,
 // the file copy is used as a fallback.
 func MoveFile(src, dst string) error {
-	err := os.Rename(src, dst)
-	if err == nil {
+	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
 
-	// fallback
-	err = CopyFile(src, dst)
-	if err != nil {
+	return MoveByCopy(src, dst)
+}
+
+// MoveByCopy retains the asynchronous source deletion after a successful copy.
+func MoveByCopy(src, dst string) error {
+	if err := CopyFile(src, dst); err != nil {
 		logger.Errorf("CopyFile failed %v", err)
 		return err
 	}
 
 	go func() {
-		err = os.RemoveAll(src)
-		if err != nil {
+		if err := os.RemoveAll(src); err != nil {
 			logger.Errorf("os.Remove failed %v", err)
 		}
 	}()

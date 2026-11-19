@@ -58,6 +58,12 @@ func (idx *Index) UpdateMetadata(info *iteminfo.FileInfo, scanner *Scanner, pers
 		if len(scanner.batchItems) >= idx.db.BatchSize {
 			scanner.flushBatch()
 		}
+		// Flush the base rows before UPDATE-only metadata commits can match
+		// them. If more than one batch accumulated, the rest stays unknown and
+		// the bounded backfill query picks it up later.
+		if len(scanner.imageCandidates) >= imageCandidateBatchSize {
+			scanner.flushImageCandidates()
+		}
 		return true
 	}
 

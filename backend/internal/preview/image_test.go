@@ -1,3 +1,5 @@
+// Ported from the FileBrowser Quantum 007-A RC4 / 007-B RC3 candidates.
+// See docs/development/007-ab-migration.md for provenance and validation.
 package preview
 
 import (
@@ -458,13 +460,14 @@ func TestCacheKeyConsistency(t *testing.T) {
 	require.NotEqual(t, cacheKey1, cacheKey3, "Different seek percentages should produce different cache keys")
 }
 
-// TestResize_ConcurrencyLimit verifies that imageSem works for basic concurrency control
+// TestResize_ConcurrencyLimit verifies the shared budget exists and basic Resize still works.
 func TestResize_ConcurrencyLimit(t *testing.T) {
 	tmpDir := t.TempDir()
 	svc := NewPreviewGenerator(2, tmpDir)
-	require.NotNil(t, svc.imageSem, "imageSem must be non-nil to test concurrency limit")
+	require.NotNil(t, svc.budget, "shared resource budget must be initialized")
 
-	// Simple smoke test - just verify Resize works with the semaphore
+	// Simple smoke test - Resize is called directly by startup icon generation
+	// and does not acquire admission itself.
 	source := newGrayJpeg(t, 100, 100)
 	defer source.Close()
 	out := &bytes.Buffer{}
@@ -473,11 +476,11 @@ func TestResize_ConcurrencyLimit(t *testing.T) {
 	require.Greater(t, out.Len(), 0)
 }
 
-// TestResize_ConcurrencyLimit_NoFFmpeg verifies that imageSem works correctly
+// TestResize_ConcurrencyLimit_NoFFmpeg verifies a single-task budget still resizes.
 func TestResize_ConcurrencyLimit_NoFFmpeg(t *testing.T) {
 	tmpDir := t.TempDir()
 	svc := NewPreviewGenerator(1, tmpDir)
-	require.NotNil(t, svc.imageSem, "imageSem should exist for concurrency control")
+	require.NotNil(t, svc.budget, "shared resource budget should exist")
 
 	source := newGrayJpeg(t, 100, 100)
 	defer source.Close()
@@ -487,8 +490,8 @@ func TestResize_ConcurrencyLimit_NoFFmpeg(t *testing.T) {
 	require.Greater(t, out.Len(), 0)
 }
 
-// TestCreatePreviewFromReader_UsesConcurrencyLimit verifies that CreatePreviewFromReader
-// goes through Resize and thus respects the imageSem semaphore (smoke test).
+// TestCreatePreviewFromReader_UsesConcurrencyLimit verifies CreatePreview still
+// produces identical bytes (smoke test); admission is tested separately.
 func TestCreatePreviewFromReader_UsesConcurrencyLimit(t *testing.T) {
 	tmpDir := t.TempDir()
 	svc := NewPreviewGenerator(2, tmpDir)

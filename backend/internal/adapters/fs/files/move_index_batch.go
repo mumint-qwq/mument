@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
 	"github.com/gtsteffaniak/go-logger/logger"
 )
@@ -121,6 +122,7 @@ func mergeDirectoryRefresh(dst *DirectoryRefresh, src DirectoryRefresh) {
 		for i := range dst.Deletes {
 			if dst.Deletes[i].Path == deletion.Path && dst.Deletes[i].IsDir == deletion.IsDir {
 				dst.Deletes[i].Recursive = dst.Deletes[i].Recursive || deletion.Recursive
+				dst.Deletes[i].imageTree = deletion.imageTree
 				merged = true
 				break
 			}
@@ -134,9 +136,16 @@ func mergeDirectoryRefresh(dst *DirectoryRefresh, src DirectoryRefresh) {
 // moveIndexImpacts describes the index work a successful move still needs. It
 // is built only after the physical move succeeded, from the same source and
 // destination identities the move used.
-func moveIndexImpacts(srcIdx, dstIdx *indexing.Index, isSrcDir bool, realsrc, realdst string) []DirectoryRefresh {
+func moveIndexImpacts(srcIdx, dstIdx *indexing.Index, isSrcDir bool, realsrc, realdst string, directoryVersion cacheledger.Version) []DirectoryRefresh {
 	impacts := make([]DirectoryRefresh, 0, 2)
 	if !srcIdx.Config.ResolvedRules.IndexingDisabled {
+		var imageTree *movedImageTree
+		if directoryVersion.Strong && !dstIdx.Config.ResolvedRules.IndexingDisabled {
+			imageTree = &movedImageTree{
+				targetSource: dstIdx.Name, targetDir: dstIdx.MakeIndexPath(realdst, true).String(),
+				targetPath: realdst, version: directoryVersion,
+			}
+		}
 		impacts = append(impacts, DirectoryRefresh{
 			Source:  srcIdx.Name,
 			Dir:     srcIdx.MakeIndexPath(filepath.Dir(realsrc), true).String(),
@@ -145,6 +154,7 @@ func moveIndexImpacts(srcIdx, dstIdx *indexing.Index, isSrcDir bool, realsrc, re
 				Path:      srcIdx.MakeIndexPath(realsrc, isSrcDir).String(),
 				IsDir:     isSrcDir,
 				Recursive: isSrcDir,
+				imageTree: imageTree,
 			}},
 		})
 	}

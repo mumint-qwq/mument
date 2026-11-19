@@ -387,17 +387,32 @@ func TestProcessFileItem(t *testing.T) {
 	}
 }
 
-func TestProcessFileItemReusesRatioAtDatabaseTimestampPrecision(t *testing.T) {
+func TestProcessFileItemReusesOnlyMatchingVersion(t *testing.T) {
 	idx, _, cleanup := setupTestIndex(t)
 	defer cleanup()
 
 	file := &mockFileInfo{
 		name: "photo.jpg", size: 1024, modTime: time.Unix(123, 987654321), isDir: false,
 	}
-	attributes := map[string]indexedImageAttributes{
-		"/test/photo.jpg": {modTime: time.Unix(123, 0), displayAspectRatio: 4.0 / 3.0},
+	path := "/test/photo.jpg"
+	version := versionFromFileInfo(file, path).String()
+
+	// Same Unix second is not enough: B requires the full observed version.
+	secondsOnly := map[string]indexedImageAttributes{
+		path: {modTime: time.Unix(123, 0), displayAspectRatio: 4.0 / 3.0},
 	}
-	info, _, _, _ := idx.processFileItem(file, "/test/", Options{}, nil, attributes)
+	info, _, _, _ := idx.processFileItem(file, "/test/", Options{}, nil, secondsOnly)
+	if info.DisplayAspectRatio != 0 {
+		t.Fatalf("seconds-only cache must not be reused, got %v", info.DisplayAspectRatio)
+	}
+
+	attributes := map[string]indexedImageAttributes{
+		path: {
+			version: version, state: iteminfo.ImageMetaReady, parserRev: iteminfo.ImageParserRevision,
+			width: 4, height: 3, orientation: 1, displayAspectRatio: 4.0 / 3.0,
+		},
+	}
+	info, _, _, _ = idx.processFileItem(file, "/test/", Options{}, nil, attributes)
 	if info.DisplayAspectRatio != 4.0/3.0 {
 		t.Fatalf("display aspect ratio = %v, want %v", info.DisplayAspectRatio, 4.0/3.0)
 	}

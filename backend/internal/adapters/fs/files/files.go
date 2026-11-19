@@ -16,6 +16,7 @@ import (
 
 	"github.com/dhowden/tag"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/fileutils"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/database/users"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/errors"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/ffmpeg"
@@ -798,37 +799,15 @@ func MoveResourceBatched(batch *IndexImpactBatch, isSrcDir bool, sourceIndex, de
 }
 
 func moveResourceImpl(isSrcDir bool, sourceIndex, destIndex, realsrc, realdst string, s *Service, batch *IndexImpactBatch) error {
-	// Check if source and destination are the same file
-	if realsrc == realdst {
-		return fmt.Errorf("cannot move a file to itself: %s", realsrc)
-	}
+	return s.moveResources(batch, []ResourceMove{{isSrcDir, sourceIndex, destIndex, realsrc, realdst}})[0]
+}
 
-	// Validate the move operation before executing
-	if err := validateMoveDestination(realsrc, realdst, isSrcDir); err != nil {
-		return err
-	}
-
-	// Get indexes for deletion and refresh operations
-	srcIdx := indexing.GetIndex(sourceIndex)
-	if srcIdx == nil {
-		return fmt.Errorf("could not get source index: %v", sourceIndex)
-	}
-	dstIdx := indexing.GetIndex(destIndex)
-	if dstIdx == nil {
-		return fmt.Errorf("could not get destination index: %v", destIndex)
-	}
-
-	// Perform the physical move
-	err := fileutils.MoveFile(realsrc, realdst)
-	if err != nil {
-		return err
-	}
-
+func (s *Service) finishMove(batch *IndexImpactBatch, srcIdx, dstIdx *indexing.Index, isSrcDir bool, realsrc, realdst string, directoryVersion cacheledger.Version) {
 	// Report the index maintenance this successful move still needs. No scan
 	// happens here: the request collects the work, and the maintenance queue
 	// merges it per directory. A single-item caller passes no batch and the
 	// work is queued immediately, which keeps uploads and renames correct.
-	if impacts := moveIndexImpacts(srcIdx, dstIdx, isSrcDir, realsrc, realdst); len(impacts) > 0 {
+	if impacts := moveIndexImpacts(srcIdx, dstIdx, isSrcDir, realsrc, realdst, directoryVersion); len(impacts) > 0 {
 		if batch != nil {
 			batch.Add(impacts...)
 		} else if submitErr := SubmitIndexMaintenance(impacts); submitErr != nil {
@@ -850,7 +829,6 @@ func moveResourceImpl(isSrcDir bool, sourceIndex, destIndex, realsrc, realdst st
 		indexWorkProbeAccessRuleUpdate()
 	}
 
-	return nil
 }
 
 func CopyResource(isSrcDir bool, sourceIndex, destIndex, realsrc, realdst string) error {

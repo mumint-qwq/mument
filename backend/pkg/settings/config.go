@@ -697,6 +697,10 @@ func loadConfigWithDefaults(configFile string, generate bool) error {
 		return fmt.Errorf("error unmarshaling YAML data: %v", err)
 	}
 
+	if Config.Server.PreviewMemoryBudgetMB == 0 {
+		Config.Server.PreviewMemoryBudgetMB = DefaultPreviewMemoryBudgetMB
+	}
+
 	if err := applyLoadedUserDefaultsFromConfig(generate); err != nil {
 		return err
 	}
@@ -759,6 +763,9 @@ func attachSourceDefaultPermissionsFromConfig(raw map[string]interface{}) {
 }
 
 func ValidateConfig(config Settings) error {
+	if budget := config.Server.PreviewMemoryBudgetMB; budget != 0 && (budget < MinPreviewMemoryBudgetMB || budget > MaxPreviewMemoryBudgetMB) {
+		return fmt.Errorf("server.previewMemoryBudgetMB must be between %d and %d MiB (got %d)", MinPreviewMemoryBudgetMB, MaxPreviewMemoryBudgetMB, budget)
+	}
 	validate := validator.New()
 
 	// Register custom validator for file permissions
@@ -860,8 +867,9 @@ func SetDefaults(generate bool) Settings {
 			BaseURL: "",
 		},
 		Server: Server{
-			MinSearchLength:    defaultMinSearchLength,
-			NumImageProcessors: 4,
+			MinSearchLength:       defaultMinSearchLength,
+			NumImageProcessors:    4,
+			PreviewMemoryBudgetMB: DefaultPreviewMemoryBudgetMB,
 			DatabaseV2: Database{
 				Path: databaseV2,
 				Activity: ActivityConfig{

@@ -70,6 +70,10 @@ type Options struct {
 	ShowHidden        bool   // Whether to include hidden files/directories
 	HideFileExt       string // Hide files based on extensions
 	Only              string // "files" or "folders" for narrow directory listings
+
+	// imageObsSeq is the observation start assigned to one directory read. It
+	// is intentionally private: callers cannot fabricate a newer sequence.
+	imageObsSeq uint64
 }
 
 // ScannerInfo is the exposed scanner information for the client
@@ -820,6 +824,16 @@ func (idx *Index) GetFsInfoViewableOnly(adjustedPath string, followSymlinks bool
 type indexedImageAttributes struct {
 	modTime            time.Time
 	displayAspectRatio float64
+	version            string
+	obsSeq             uint64
+	guard              uint64
+	state              iteminfo.ImageMetaState
+	width              int
+	height             int
+	orientation        uint8
+	parserRev          uint16
+	retryCount         uint16
+	retryAt            int64
 }
 
 // fetchExtendedAttributes loads indexed subfolder has_preview and image ratios for the current
@@ -845,14 +859,27 @@ func (idx *Index) fetchExtendedAttributes(indexPath string, opts Options) (map[s
 		}
 	}
 	for _, file := range realDirInfo.Files {
-		if file.DisplayAspectRatio <= 0 {
+		if file.Image == nil && file.DisplayAspectRatio <= 0 {
 			continue
 		}
 		key := utils.JoinPathAsUnix(indexPath, file.Name)
-		imageAttributes[key] = indexedImageAttributes{
+		attr := indexedImageAttributes{
 			modTime:            file.ModTime,
 			displayAspectRatio: file.DisplayAspectRatio,
 		}
+		if file.Image != nil {
+			attr.version = file.Image.Version
+			attr.obsSeq = file.Image.ObsSeq
+			attr.guard = file.Image.Guard
+			attr.state = file.Image.State
+			attr.width = file.Image.Width
+			attr.height = file.Image.Height
+			attr.orientation = file.Image.Orientation
+			attr.parserRev = file.Image.ParserRev
+			attr.retryCount = file.Image.RetryCount
+			attr.retryAt = file.Image.RetryAt
+		}
+		imageAttributes[key] = attr
 	}
 
 	return subdirHasPreviewMap, imageAttributes
@@ -932,14 +959,49 @@ func (idx *Index) processFileItem(file os.FileInfo, indexPath string, opts Optio
 	itemInfo.Size = int64(size)
 	if strings.HasPrefix(itemInfo.Type, "image/") {
 		indexFilePath := utils.JoinPathAsUnix(indexPath, file.Name())
-		// The index stores modification timestamps at Unix-second precision.
-		if cached, ok := imageAttributes[indexFilePath]; ok && cached.modTime.Unix() == file.ModTime().Unix() {
-			itemInfo.DisplayAspectRatio = cached.displayAspectRatio
+		observed := versionFromFileInfo(file, fullCombined)
+		obsSeq := opts.imageObsSeq
+		if obsSeq == 0 {
+			// Direct unit-test callers that do not come through GetDirInfoCore.
+			obsSeq = idx.db.NextImageObsSeq()
 		}
-		// Directory requests only use indexed values. Header I/O happens during
-		// scanner work so opening a directory cannot fan out into per-file reads.
-		if itemInfo.DisplayAspectRatio <= 0 && scanner != nil {
-			itemInfo.DisplayAspectRatio = readDisplayAspectRatio(fullCombined, itemInfo.Type)
+		im := &iteminfo.ImageIndexMeta{
+			Version:     observed.String(),
+			ObsSeq:      obsSeq,
+			Guard:       obsSeq, // birth token of this row lifetime
+			State:       iteminfo.ImageMetaUnknown,
+			LogicalSize: observed.Size,
+			MTimeNS:     observed.MtimeNS,
+		}
+		cached, ok := imageAttributes[indexFilePath]
+		sameVersion := ok && cached.version != "" && cached.version == im.Version
+		if sameVersion {
+			switch {
+			case cached.state == iteminfo.ImageMetaReady && cached.parserRev == iteminfo.ImageParserRevision:
+				ratio := iteminfo.DisplayAspectRatioFromDimensions(cached.width, cached.height, cached.orientation)
+				if ratio > 0 {
+					itemInfo.DisplayAspectRatio = ratio
+					// The cached result is reusable, but its guard belongs to the
+					// row lifetime that produced it. The observation supplies a
+					// candidate token; the database assigns the actual birth
+					// token on INSERT. An UPSERT keeps the existing row guard only
+					// when the version is unchanged, so a cache hit cannot revive
+					// a deleted row's identity.
+					im.State = iteminfo.ImageMetaReady
+					im.Width, im.Height, im.Orientation = cached.width, cached.height, cached.orientation
+					im.ParserRev = cached.parserRev
+				}
+			case cached.state == iteminfo.ImageMetaUnsupported && cached.parserRev == iteminfo.ImageParserRevision:
+				im.State, im.ParserRev = iteminfo.ImageMetaUnsupported, cached.parserRev
+			case (cached.state == iteminfo.ImageMetaDeferred || cached.state == iteminfo.ImageMetaFailed) &&
+				cached.parserRev == iteminfo.ImageParserRevision && cached.retryAt > time.Now().Unix():
+				im.State = cached.state
+				im.ParserRev, im.RetryCount, im.RetryAt = cached.parserRev, cached.retryCount, cached.retryAt
+			}
+		}
+		itemInfo.Image = im
+		if scanner != nil && itemInfo.DisplayAspectRatio <= 0 && im.State == iteminfo.ImageMetaUnknown {
+			scanner.queueImageCandidate(indexFilePath, observed, im.ObsSeq)
 		}
 	}
 
@@ -973,10 +1035,15 @@ func (idx *Index) GetDirInfoCore(dirInfo *os.File, stat os.FileInfo, indexPath s
 	if !strings.HasSuffix(indexPath, "/") {
 		indexPath = indexPath + "/"
 	}
+	// Assign the observation sequence before reading the directory. Any older
+	// Readdir/stat snapshot must sort before a later observation even if its
+	// items are processed or committed much later.
+	opts.imageObsSeq = idx.db.NextImageObsSeq()
 	files, err := dirInfo.Readdir(-1)
 	if err != nil {
 		return nil, err
 	}
+	runDirectoryReadTestHook("after_readdir", idx.Name, indexPath)
 	subdirHasPreviewMap, imageAttributes := idx.fetchExtendedAttributes(indexPath, opts)
 
 	baseName := filepath.Base(indexPath)

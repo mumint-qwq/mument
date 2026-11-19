@@ -5,6 +5,15 @@ import (
 	"github.com/gtsteffaniak/filebrowser/backend/internal/database/users"
 )
 
+// Preview memory budget bounds. The default is a candidate value measured
+// against the four 007-A progressive JPEG samples and the 1 GiB container
+// limit; it is configurable because the safe value depends on the host.
+const (
+	DefaultPreviewMemoryBudgetMB = 768
+	MinPreviewMemoryBudgetMB     = 64
+	MaxPreviewMemoryBudgetMB     = 4096
+)
+
 type AllowedMethods string
 
 var Env Environment
@@ -64,6 +73,7 @@ type Server struct {
 	MinSearchLength              int            `json:"minSearchLength" yaml:"minSearchLength"` // minimum length of search query to begin searching (default: 3)
 	DisableUpdateCheck           bool           `json:"disableUpdateCheck"`                     // disables backend update check service
 	NumImageProcessors           int            `json:"numImageProcessors"`                     // number of concurrent image processing jobs used to create previews, default is 4.
+	PreviewMemoryBudgetMB        int            `json:"previewMemoryBudgetMB"`                  // shared decode memory budget for previews in MiB, default 768; 0 means unset
 	DisablePreviews              bool           `json:"disablePreviews"`                        // disable all previews thumbnails, simple icons will be used
 	DisableResize                bool           `json:"disablePreviewResize"`                   // disable resizing of previews for faster loading over slow connections
 	DisableTypeDetectionByHeader bool           `json:"disableTypeDetectionByHeader"`           // disable type detection by header, useful if filesystem is slow.

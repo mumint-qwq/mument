@@ -1236,10 +1236,56 @@ func ResourcePatchHandler(w http.ResponseWriter, r *http.Request, d *Context) (i
 	indexBatch := files.NewIndexImpactBatch()
 	defer indexBatch.Submit()
 
-	// Process each item
+	type queuedMove struct {
+		move     files.ResourceMove
+		item     MoveCopyItem
+		from, to string
+	}
+	var pending []queuedMove
+	record := func(item MoveCopyItem, from, to, realSrc, realDest string, err error) {
+		if err != nil {
+			logger.Errorf("Could not run patch action. src=%v dst=%v err=%v", realSrc, realDest, err)
+			if d.Share.Hash != "" {
+				response.Failed = append(response.Failed, MoveCopyItem{Message: "could not run patch action"})
+			} else {
+				item.Message = err.Error()
+				response.Failed = append(response.Failed, moveCopyWithClientPaths(item, from, to))
+			}
+			return
+		}
+		response.Succeeded = append(response.Succeeded, moveCopyWithClientPaths(item, from, to))
+		activity.RecordPatchItem(r, toActor(d), req.Action, activity.MoveCopyItem{FromSource: item.FromSource, FromPath: from, ToPath: to})
+	}
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		moves := make([]files.ResourceMove, len(pending))
+		for i, entry := range pending {
+			moves[i] = entry.move
+		}
+		for i, err := range files.MoveResourcesBatched(indexBatch, moves) {
+			entry := pending[i]
+			if err == nil {
+				reconcileSharesAfterMove(entry.move.Directory, entry.move.Source, entry.move.Target, entry.move.From, entry.move.To)
+			}
+			record(entry.item, entry.from, entry.to, entry.move.From, entry.move.To, err)
+		}
+		pending = pending[:0]
+	}
+
+	// Process each item, flushing before explicit dependencies. Directories and
+	// automatic suffix selection still run in request order.
 	for _, item := range req.Items {
 		clientFromPath := item.FromPath
 		clientToPath := item.ToPath
+		for _, entry := range pending {
+			if moveNamesOverlap(entry.move.From, entry.move.To, clientFromPath, clientToPath) ||
+				moveNamesOverlap(entry.from, entry.to, clientFromPath, clientToPath) {
+				flush()
+				break
+			}
+		}
 
 		// Validate all fields are provided
 		if item.FromSource == "" || clientFromPath == "" || item.ToSource == "" || clientToPath == "" {
@@ -1443,35 +1489,34 @@ func ResourcePatchHandler(w http.ResponseWriter, r *http.Request, d *Context) (i
 			}
 		}
 
-		// Perform the action
-		err = patchAction(r.Context(), patchActionParams{
-			action:     req.Action,
-			srcIndex:   item.FromSource,
-			dstIndex:   item.ToSource,
-			src:        realSrc,
-			dst:        realDest,
-			d:          d,
-			isSrcDir:   isSrcDir,
-			indexBatch: indexBatch,
-		})
-		if err != nil {
-			logger.Errorf("Could not run patch action. src=%v dst=%v err=%v", realSrc, realDest, err)
-			if d.Share.Hash != "" {
-				item.Message = "could not run patch action"
-				response.Failed = append(response.Failed, MoveCopyItem{
-					Message: item.Message,
-				})
-				continue
-			}
-			item.Message = err.Error()
-			response.Failed = append(response.Failed, moveCopyWithClientPaths(item, clientFromPath, clientToPath))
+		if req.Action == "copy" {
+			err = files.CopyResource(isSrcDir, item.FromSource, item.ToSource, realSrc, realDest)
+			record(item, clientFromPath, clientToPath, realSrc, realDest, err)
 			continue
 		}
-
-		// Success
-		response.Succeeded = append(response.Succeeded, moveCopyWithClientPaths(item, clientFromPath, clientToPath))
-		activity.RecordPatchItem(r, toActor(d), req.Action, activity.MoveCopyItem{FromSource: item.FromSource, FromPath: clientFromPath, ToPath: clientToPath})
+		for _, entry := range pending {
+			if moveNamesOverlap(entry.move.From, entry.move.To, realSrc, realDest) {
+				flush()
+				break
+			}
+		}
+		if isSrcDir || req.Rename {
+			flush()
+		}
+		err = validatePatchMove(r.Context(), d, item.FromSource, realSrc, isSrcDir)
+		if err != nil {
+			record(item, clientFromPath, clientToPath, realSrc, realDest, err)
+			continue
+		}
+		pending = append(pending, queuedMove{
+			move: files.ResourceMove{Directory: isSrcDir, Source: item.FromSource, Target: item.ToSource, From: realSrc, To: realDest},
+			item: item, from: clientFromPath, to: clientToPath,
+		})
+		if isSrcDir || req.Rename || len(pending) == files.MoveGroupLimit {
+			flush()
+		}
 	}
+	flush()
 
 	if len(response.Failed) == 0 && len(response.Succeeded) == 0 {
 		response.Failed = append(response.Failed, MoveCopyItem{
@@ -1593,56 +1638,30 @@ func addVersionSuffix(source string) string {
 	return source
 }
 
-type patchActionParams struct {
-	action     string
-	srcIndex   string
-	dstIndex   string
-	src        string
-	dst        string
-	d          *Context
-	isSrcDir   bool
-	indexBatch *files.IndexImpactBatch
+// A basename check also catches dependencies across aliases, sources and
+// scopes. Any possible match warrants a flush before checking the next item.
+func moveNamesOverlap(from, to, nextFrom, nextTo string) bool {
+	a, b := filepath.Base(from), filepath.Base(to)
+	c, d := filepath.Base(nextFrom), filepath.Base(nextTo)
+	return a == c || a == d || b == c || b == d
 }
 
-func patchAction(ctx context.Context, params patchActionParams) error {
-	switch params.action {
-	case "copy":
-		err := files.CopyResource(params.isSrcDir, params.srcIndex, params.dstIndex, params.src, params.dst)
-		return err
-	case "rename", "move":
-		idx := indexing.GetIndex(params.srcIndex)
-		srcPath := idx.MakeIndexPath(params.src, params.isSrcDir).String()
-		userScope := ""
-		userScope, _ = params.d.User.GetScopeForSourceName(params.srcIndex)
-		if userScope != "" && userScope != "/" {
-			// Strip the user scope from srcPath so FileInfoFaster doesn't double it
-			srcPath = strings.TrimPrefix(srcPath, userScope)
-		}
-
-		fileInfo, err := files.FileInfoFaster(utils.FileOptions{
-			FollowSymlinks: true,
-			Path:           srcPath,
-			Source:         params.srcIndex,
-			IsDir:          params.isSrcDir,
-			ShowHidden:     params.d.User.ShowHidden,
-			HideFileExt:    params.d.User.HideFileExt,
-		}, params.d.User)
-
-		if err != nil {
-			return err
-		}
-
-		// delete thumbnails
-		preview.DelThumbs(ctx, *fileInfo)
-		err = files.MoveResourceBatched(params.indexBatch, params.isSrcDir, params.srcIndex, params.dstIndex, params.src, params.dst)
-		if err != nil {
-			return err
-		}
-		reconcileSharesAfterMove(params.isSrcDir, params.srcIndex, params.dstIndex, params.src, params.dst)
-		return nil
-	default:
-		return fmt.Errorf("unsupported action %s: %w", params.action, errors.ErrInvalidRequestParams)
+func validatePatchMove(ctx context.Context, d *Context, source, path string, isDir bool) error {
+	idx := indexing.GetIndex(source)
+	srcPath := idx.MakeIndexPath(path, isDir).String()
+	userScope, _ := d.User.GetScopeForSourceName(source)
+	if userScope != "" && userScope != "/" {
+		srcPath = strings.TrimPrefix(srcPath, userScope)
 	}
+	fileInfo, err := files.FileInfoFaster(utils.FileOptions{
+		FollowSymlinks: true, Path: srcPath, Source: source, IsDir: isDir,
+		ShowHidden: d.User.ShowHidden, HideFileExt: d.User.HideFileExt,
+	}, d.User)
+	if err != nil {
+		return err
+	}
+	preview.DiscardMovedLegacy(ctx, *fileInfo)
+	return nil
 }
 
 func inspectIndex(w http.ResponseWriter, r *http.Request) {
