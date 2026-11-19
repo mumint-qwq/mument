@@ -142,6 +142,10 @@ func ledgerVariant(file iteminfo.ExtendedFileInfo, size string) string {
 }
 
 func (s *Service) planLedgerPreview(ctx context.Context, file iteminfo.ExtendedFileInfo, size string) (*ledgerPreview, error) {
+	return s.planLedgerPreviewWithStat(ctx, file, size, nil, true)
+}
+
+func (s *Service) planLedgerPreviewWithStat(ctx context.Context, file iteminfo.ExtendedFileInfo, size string, guarded *warmupInput, resolve bool) (*ledgerPreview, error) {
 	variant := ledgerVariant(file, size)
 	if variant == "" || file.Source == "" {
 		return nil, nil
@@ -151,7 +155,14 @@ func (s *Service) planLedgerPreview(ctx context.Context, file iteminfo.ExtendedF
 		return nil, nil
 	}
 	path := filepath.Clean(file.RealPath)
-	info, err := os.Stat(path)
+	stat := func() (os.FileInfo, error) { return os.Stat(path) }
+	if guarded != nil {
+		stat = func() (os.FileInfo, error) { return guarded.stat(ctx) }
+	}
+	info, err := stat()
+	if err != nil && guarded != nil {
+		return nil, err
+	}
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, ErrPreviewSourceChanged
 	}
@@ -174,6 +185,22 @@ func (s *Service) planLedgerPreview(ctx context.Context, file iteminfo.ExtendedF
 		return uncached()
 	}
 
+	namespace, name, ok := cacheledger.Location(idx.Path, path)
+	if !ok {
+		return uncached()
+	}
+	if !resolve {
+		ref, err := s.ledger.FindRef(ctx, namespace, name, v)
+		if err != nil {
+			return nil, ErrWarmupStore
+		}
+		plan.ref = ref
+		if ref.Asset != "" {
+			plan.key = "c-raster/" + ref.Asset + "/" + variant
+		}
+		return plan, nil
+	}
+
 	// Serialize lookup/create with the short application rename/commit window.
 	// Never hold this lock while reading originals or waiting for a flight.
 	unlock, err := s.ledger.LockLocations(ctx)
@@ -181,17 +208,20 @@ func (s *Service) planLedgerPreview(ctx context.Context, file iteminfo.ExtendedF
 		return nil, err
 	}
 	defer unlock()
-	namespace, name, ok := cacheledger.Location(idx.Path, path)
-	if !ok {
-		return uncached()
+	current, err := stat()
+	if err != nil && guarded != nil {
+		return nil, err
 	}
-	if current, err := cacheledger.Observe(path); err != nil || current != v {
+	if err != nil || cacheledger.FromFileInfo(current) != v {
 		return nil, ErrPreviewSourceChanged
 	}
 	ref, err := s.ledger.Resolve(ctx, namespace, name, v)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if guarded != nil {
+			return nil, ErrWarmupStore
 		}
 		logger.Warningf("cannot resolve image preview cache reference: %v", err)
 		return uncached()
@@ -254,7 +284,7 @@ func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledger
 	return previewResult{data: data, ready: result}, true, nil
 }
 
-func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool) (cacheledger.Result, error) {
+func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool, warmup *warmupInput) (cacheledger.Result, error) {
 	if plan == nil {
 		return cacheledger.Result{}, s.fileCache.Store(ctx, key, data)
 	}
@@ -263,6 +293,17 @@ func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *led
 	}
 	if err := s.fileCache.Store(ctx, key, data); err != nil {
 		return cacheledger.Result{}, err
+	}
+	if warmup != nil {
+		unlock, err := s.ledger.LockLocations(ctx)
+		if err != nil {
+			return cacheledger.Result{}, err
+		}
+		defer unlock()
+		info, err := warmup.stat(ctx)
+		if err != nil || cacheledger.FromFileInfo(info) != plan.version {
+			return cacheledger.Result{}, ErrPreviewSourceChanged
+		}
 	}
 	return s.ledger.Publish(ctx, plan.ref, plan.variant, key, data)
 }

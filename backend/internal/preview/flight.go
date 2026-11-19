@@ -4,6 +4,7 @@ package preview
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -69,6 +70,10 @@ func newFlightGroup[T any](baseCtx context.Context, stats *previewStats, tasks .
 }
 
 func (g *flightGroup[T]) do(ctx context.Context, key string, fn func(context.Context, func() bool) (T, error)) (T, error) {
+	return g.doWithAdmission(ctx, key, false, fn)
+}
+
+func (g *flightGroup[T]) doWithAdmission(ctx context.Context, key string, background bool, fn func(context.Context, func() bool) (T, error)) (T, error) {
 	var zero T
 	if err := ctx.Err(); err != nil {
 		return zero, err
@@ -85,7 +90,7 @@ func (g *flightGroup[T]) do(ctx context.Context, key string, fn func(context.Con
 	}
 	call := g.calls[key]
 	if call == nil {
-		if !g.tasks.tryAcquire() {
+		if !background && !g.tasks.tryAcquire() {
 			g.mu.Unlock()
 			return zero, ErrPreviewSaturated
 		}
@@ -95,7 +100,7 @@ func (g *flightGroup[T]) do(ctx context.Context, key string, fn func(context.Con
 			done:      make(chan struct{}),
 			ctx:       taskCtx,
 			cancel:    cancel,
-			entryHeld: true,
+			entryHeld: !background,
 		}
 		g.calls[key] = call
 		g.stats.tasksStarted.Add(1)
@@ -124,6 +129,10 @@ func (g *flightGroup[T]) do(ctx context.Context, key string, fn func(context.Con
 		g.mu.Unlock()
 		g.stats.canceledWaiters.Add(1)
 		g.leave(call)
+		if background {
+			// The scheduler drains its one flight before touching dependencies.
+			<-call.done
+		}
 		return zero, ctx.Err()
 	}
 }
@@ -157,7 +166,11 @@ func (g *flightGroup[T]) run(call *flightCall[T], fn func(context.Context, func(
 			if recovered := recover(); recovered != nil {
 				g.stats.panics.Add(1)
 				err = fmt.Errorf("preview generation panicked: %v", recovered)
-				logger.Errorf("preview generation panic: %v\n%s", recovered, debug.Stack())
+				if call.entryHeld {
+					logger.Errorf("preview generation panic: %v\n%s", recovered, debug.Stack())
+				} else {
+					err = errors.Join(errWarmupFlight, errors.New("background preview generation panicked"))
+				}
 			}
 		}()
 		data, err = fn(call.ctx, markStarted)

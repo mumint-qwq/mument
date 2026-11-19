@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -72,18 +73,45 @@ func (p *budgetPermit) release() {
 	})
 }
 
+func (b *resourceBudget) checkEstimate(bytes int64) error {
+	if bytes <= b.maxBytes {
+		return nil
+	}
+	if b.stats != nil {
+		b.stats.overBudget.Add(1)
+	}
+	return fmt.Errorf("%w: estimated %d MiB exceeds the %d MiB budget", ErrPreviewOverBudget, bytes>>20, b.maxBytes>>20)
+}
+
+// acquireIdle never enters the interactive FIFO. Only one background task
+// can hold a decode reservation because it requires an entirely idle budget.
+func (b *resourceBudget) acquireIdle(ctx context.Context, bytes int64, interactive *atomic.Int64) (*budgetPermit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	bytes = max(bytes, 1)
+	if err := b.checkEstimate(bytes); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil, ErrPreviewShuttingDown
+	}
+	if interactive.Load() != 0 || b.active != 0 || len(b.waiters) != 0 {
+		return nil, ErrPreviewBusy
+	}
+	b.grantLocked(bytes)
+	return &budgetPermit{budget: b, bytes: bytes}, nil
+}
+
 func (b *resourceBudget) acquire(ctx context.Context, bytes int64) (*budgetPermit, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if bytes < 1 {
-		bytes = 1
-	}
-	if bytes > b.maxBytes {
-		if b.stats != nil {
-			b.stats.overBudget.Add(1)
-		}
-		return nil, fmt.Errorf("%w: estimated %d MiB exceeds the %d MiB budget", ErrPreviewOverBudget, bytes>>20, b.maxBytes>>20)
+	bytes = max(bytes, 1)
+	if err := b.checkEstimate(bytes); err != nil {
+		return nil, err
 	}
 
 	b.mu.Lock()

@@ -19,6 +19,7 @@ import (
 	"github.com/gtsteffaniak/filebrowser/backend/internal/app"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/icons"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/previewwarmup"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/state"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/version"
@@ -168,6 +169,7 @@ func StartFilebrowser() {
 	}
 
 	httpResult := <-shutdownComplete
+	<-done // rootCMD has drained preview warmup before dependencies can close.
 	if !httpResult.Drained {
 		logger.Errorf("HTTP shutdown did not drain cleanly: %d handler(s) still active (error: %v)",
 			httpResult.ActiveHandlers, httpResult.HTTPError)
@@ -201,15 +203,6 @@ func StartFilebrowser() {
 	// active handlers must leave it open.
 	busy := errors.Is(stopErr, files.ErrIndexMaintenanceBusy)
 	canCloseDependencies := httpResult.Drained && !busy
-	indexDB := indexing.GetIndexDB()
-	if indexDB != nil {
-		if canCloseDependencies {
-			indexDB.Close()
-		} else {
-			logger.Errorf("leaving the index database open (handlers_drained=%v maintenance_busy=%v)",
-				httpResult.Drained, busy)
-		}
-	}
 	// Preview tasks may still hold decode memory after HTTP handlers drained.
 	// Cancel queued work and wait for active generation to leave the budget
 	// before the cache directory can be cleared on shutdown.
@@ -223,8 +216,18 @@ func StartFilebrowser() {
 		}
 		cancelPreview()
 	}
+	canCloseDependencies = canCloseDependencies && previewStopped
+	indexDB := indexing.GetIndexDB()
+	if indexDB != nil {
+		if canCloseDependencies {
+			indexDB.Close()
+		} else {
+			logger.Errorf("leaving the index database open (handlers_drained=%v maintenance_busy=%v preview_stopped=%v)",
+				httpResult.Drained, busy, previewStopped)
+		}
+	}
 	if settings.Config.Server.CacheDirCleanup {
-		if canCloseDependencies && previewStopped {
+		if canCloseDependencies {
 			logger.Debugf("clearing cache dir: %s", settings.Config.Server.CacheDir)
 			fileutils.ClearCacheDir(settings.Config.Server.CacheDir)
 		} else {
@@ -276,10 +279,17 @@ func rootCMD(ctx context.Context, serverConfig *settings.Server, a *app.App, shu
 	// Initialize PWA manifest after icons are generated
 	icons.InitializePWAManifest()
 
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	warmup := previewwarmup.New(workerCtx, *serverConfig, indexing.GetIndexDB(), preview.GetService())
+	defer func() {
+		cancelWorker()
+		warmup.Wait()
+	}()
 	web.StartHttp(ctx, web.Deps{
-		Store: a.Store,
-		Files: a.Files,
-		Auth:  a.Auth,
+		Store:         a.Store,
+		Files:         a.Files,
+		Auth:          a.Auth,
+		PreviewWarmup: warmup,
 	}, shutdownComplete)
 	return nil
 }

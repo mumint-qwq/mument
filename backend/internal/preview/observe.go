@@ -53,9 +53,11 @@ type previewStats struct {
 	taskSlotsInUse    atomic.Int64
 	peakTaskSlots     atomic.Int64
 
-	queueWaitNanos atomic.Uint64
-	generateNanos  atomic.Uint64
-	publishNanos   atomic.Uint64
+	warmupHoldNanos    atomic.Uint64
+	warmupMaxHoldNanos atomic.Uint64
+	queueWaitNanos     atomic.Uint64
+	generateNanos      atomic.Uint64
+	publishNanos       atomic.Uint64
 }
 
 // PreviewStats is a point-in-time diagnostic snapshot. Memory fields are

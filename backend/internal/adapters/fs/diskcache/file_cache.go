@@ -25,13 +25,8 @@ type Cache interface {
 
 // FileCache struct for file-based caching
 type FileCache struct {
-	dir string
-	// granular locks
-	scopedLocks struct {
-		sync.Mutex
-		sync.Once
-		locks map[string]sync.Locker
-	}
+	dir   string
+	locks [64]sync.Mutex
 }
 
 func NewFileCache(dir string) (*FileCache, error) {
@@ -97,7 +92,7 @@ func migrateOldCacheStructure(oldDir, newDir string) error {
 // value, never a partially written preview. A failed write removes its own
 // temporary file and leaves any existing usable value untouched.
 func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
-	mu := f.getScopedLocks(key)
+	mu := f.keyLock(key)
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -143,6 +138,18 @@ func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 	return nil
 }
 
+// HasSized checks the ledger's physical result without loading thumbnail bytes.
+func (f *FileCache) HasSized(key string, size int64) (bool, error) {
+	info, err := os.Lstat(f.getFileName(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular() && info.Size() == size, nil
+}
+
 func (f *FileCache) Load(ctx context.Context, key string) (value []byte, exist bool, err error) {
 	r, ok, err := f.open(key)
 	if err != nil || !ok {
@@ -180,7 +187,7 @@ func (f *FileCache) LoadSized(ctx context.Context, key string, size int64) ([]by
 }
 
 func (f *FileCache) Delete(ctx context.Context, key string) error {
-	mu := f.getScopedLocks(key)
+	mu := f.keyLock(key)
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -204,19 +211,10 @@ func (f *FileCache) open(key string) (*os.File, bool, error) {
 	return file, true, nil
 }
 
-// getScopedLocks pull lock from the map if found or create a new one
-func (f *FileCache) getScopedLocks(key string) (lock sync.Locker) {
-	f.scopedLocks.Do(func() { f.scopedLocks.locks = map[string]sync.Locker{} })
-
-	f.scopedLocks.Lock()
-	lock, ok := f.scopedLocks.locks[key]
-	if !ok {
-		lock = &sync.Mutex{}
-		f.scopedLocks.locks[key] = lock
-	}
-	f.scopedLocks.Unlock()
-
-	return lock
+// Stripes keep write/delete serialization bounded as new keys are cached.
+func (f *FileCache) keyLock(key string) *sync.Mutex {
+	hash := sha1.Sum([]byte(key))
+	return &f.locks[int(hash[0])%len(f.locks)]
 }
 
 func (f *FileCache) getFileName(key string) string {
