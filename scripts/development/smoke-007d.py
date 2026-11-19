@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import secrets
 import signal
 import socket
@@ -143,6 +144,8 @@ def server(args, root, output, phase, enabled, crash=False):
                 return request(root, "/health")[0] == 200
 
             until(healthy)
+            if phase == "default" and args.expected_commit:
+                check_candidate(args, root, name, output)
             yield name if args.image else proc.pid
             completed = True
         finally:
@@ -169,8 +172,40 @@ def server(args, root, output, phase, enabled, crash=False):
             expected = (137 if args.image else -signal.SIGKILL) if force else 0
             if completed and proc.returncode != expected:
                 raise RuntimeError(f"{phase} exited with code {proc.returncode}; expected {expected}")
-            if args.image and completed and inspected.returncode == 0:
+            if args.image and completed:
+                assert inspected.returncode == 0, inspected.stderr
                 assert not state["OOMKilled"] and state["ExitCode"] == expected, state
+
+
+def check_candidate(args, root, name, output):
+    if args.image:
+        command = ["docker", "exec", name, "filebrowser", "version"]
+    else:
+        command = [str(args.binary), "version"]
+    info = subprocess.check_output(command, cwd=root, stderr=subprocess.STDOUT)
+    (output / "candidate-version.log").write_bytes(info)
+    match = re.search(rb"(?m)^\s*Commit\s*:\s*([0-9a-f]{40})\s*$", info)
+    assert match and match[1].decode() == args.expected_commit, "binary commit does not match the candidate"
+    html = ok(root, "/")
+    marker = b'<meta name="quantum-source-commit" content="' + args.expected_commit.encode() + b'">'
+    assert marker in html, "served frontend commit does not match the candidate"
+    (output / "served-build-marker").write_bytes(marker + b"\n")
+
+
+def check_cgroup(sample):
+    counters = {}
+    for line in sample.decode().splitlines():
+        if line.startswith("/sys/fs/cgroup/"):
+            section = line.removeprefix("/sys/fs/cgroup/")
+            counters[section] = []
+        else:
+            counters[section].append(line)
+    quota, period = map(int, counters["cpu.max"][0].split())
+    assert period > 0 and quota == 2 * period, counters["cpu.max"]
+    assert counters["memory.max"] == ["1073741824"], counters["memory.max"]
+    assert counters["memory.swap.max"] == ["1073741824"], counters["memory.swap.max"]
+    events = dict(line.split() for line in counters["memory.events"])
+    assert events["oom"] == "0" and events["oom_kill"] == "0", events
 
 
 def sample_runtime(args, handle, output, phase):
@@ -181,6 +216,7 @@ def sample_runtime(args, handle, output, phase):
                    "sample", *files]
         sample = subprocess.run(command, capture_output=True, check=True).stdout
         (output / f"{phase}-cgroup.txt").write_bytes(sample)
+        check_cgroup(sample)
     else:
         for name in ("io", "status", "stat"):
             (output / f"{phase}-proc-{name}.txt").write_bytes(Path(f"/proc/{handle}/{name}").read_bytes())
@@ -273,6 +309,7 @@ def run_comparison(args, output, root, enabled):
         })
         until(lambda: request(root, directory_query)[0] == 200)
         sample_runtime(args, handle, output, phase + "-start")
+        before_status = control(root)
         latency = []
         listings = []
         start = time.monotonic()
@@ -289,12 +326,18 @@ def run_comparison(args, output, root, enabled):
         sample_runtime(args, handle, output, phase + "-end")
         status = control(root)
         seconds = time.monotonic() - start
+        generated = status["generated"] - before_status["generated"]
         (output / f"{phase}.json").write_text(json.dumps({
             "elapsedSeconds": seconds, "foregroundMs": latency, "listingMs": listings,
-            "backgroundPerSecond": status["generated"] / seconds,
+            "backgroundGeneratedDuringLoad": generated,
+            "backgroundPerSecond": generated / seconds,
             "initialBackground": 25, "remainingAtLeast": max(0, 25 - status["generated"]),
-            "status": status,
+            "beforeStatus": before_status, "status": status,
         }, indent=2))
+        if enabled:
+            assert generated > 0, "enabled workload made no background progress"
+        else:
+            assert status["generated"] == 0, "disabled workload published background previews"
 
 
 def main():
@@ -303,9 +346,12 @@ def main():
     mode.add_argument("--binary", type=lambda value: Path(value).resolve())
     mode.add_argument("--image", help="prebuilt local mument candidate tag or image ID")
     parser.add_argument("--output", required=True, type=lambda value: Path(value).resolve())
+    parser.add_argument("--expected-commit", help="full SHA embedded in the binary and served HTML")
     parser.add_argument("--interrupt", action="store_true", help="kill a scratch process while the worker is active")
     parser.add_argument("--compare", action="store_true", help="collect the fixed on/off workload and runtime counters")
     args = parser.parse_args()
+    if (args.image or args.expected_commit) and not re.fullmatch(r"[0-9a-f]{40}", args.expected_commit or ""):
+        parser.error("provide --expected-commit with a full lowercase source SHA")
     args.output.mkdir(parents=True, exist_ok=True)
     if args.image:
         identity = subprocess.check_output(["docker", "image", "inspect", "--format", "{{.Id}}", args.image], text=True).strip()

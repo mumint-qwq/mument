@@ -3,6 +3,7 @@ package previewwarmup
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -79,9 +80,17 @@ type Status struct {
 	Scopes []ScopeStatus `json:"scopes"`
 }
 
+type previewService interface {
+	IdleForWarmup() bool
+	WarmupDirectoryHint() *preview.WarmupDirectory
+	WarmupMetrics() preview.WarmupMetrics
+	WarmPreviewWhenIdle(context.Context, iteminfo.ExtendedFileInfo,
+		func(context.Context) (*os.File, error), func(context.Context) (os.FileInfo, error), func(int64) error) error
+}
+
 type Worker struct {
 	db     *indexsql.IndexDB
-	svc    *preview.Service
+	svc    previewService
 	scopes []scope
 	probe  resourceProbe
 	done   chan struct{}
@@ -93,7 +102,10 @@ type Worker struct {
 }
 
 func New(ctx context.Context, server settings.Server, db *indexsql.IndexDB, svc *preview.Service) *Worker {
-	w := &Worker{db: db, svc: svc, done: make(chan struct{}), status: Status{Reason: "disabled"}}
+	w := &Worker{db: db, done: make(chan struct{}), status: Status{Reason: "disabled"}}
+	if svc != nil {
+		w.svc = svc
+	}
 	if !server.PreviewWarmup.Enabled {
 		close(w.done)
 		return w
@@ -132,7 +144,21 @@ func indexPrefix(relative string) string {
 	return "/" + filepath.ToSlash(relative) + "/"
 }
 
-func (w *Worker) Wait() { <-w.done }
+// Wait reports when the worker and its preview flight have left their shared
+// dependencies. A deadline leaves ownership with the still-running worker.
+func (w *Worker) Wait(ctx context.Context) error {
+	select {
+	case <-w.done:
+		return nil
+	default:
+	}
+	select {
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func (w *Worker) Snapshot() Status {
 	w.mu.Lock()
@@ -201,6 +227,9 @@ func (w *Worker) run(ctx context.Context) {
 			logger.Infof("preview warmup reason=%s discovered=%d cached=%d generated=%d original=%d changed=%d retried=%d terminal=%d deferred=%d",
 				s.Reason, s.Discovered, s.Cached, s.Generated, s.Original, s.Changed, s.Retried, s.Terminal, s.Deferred)
 		case <-tick.C:
+			if ctx.Err() != nil {
+				return
+			}
 			w.mu.Lock()
 			if w.status.Paused {
 				w.mu.Unlock()

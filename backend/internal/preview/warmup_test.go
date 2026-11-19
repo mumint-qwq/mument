@@ -5,6 +5,7 @@ package preview
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/png"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
@@ -77,7 +79,7 @@ func TestWarmupPublicationAndForegroundUse(t *testing.T) {
 }
 
 func TestWarmupJoinsAndCancellation(t *testing.T) {
-	for _, scenario := range []string{"foreground_before_permit", "foreground_cancels", "warmup_cancels", "same_key"} {
+	for _, scenario := range []string{"foreground_before_permit", "foreground_cancels", "warmup_cancels", "same_key", "store_failure", "source_check_failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			svc, file := warmupTestSource(t)
 			entered, release := make(chan struct{}), make(chan struct{})
@@ -85,6 +87,12 @@ func TestWarmupJoinsAndCancellation(t *testing.T) {
 			stop := func() { once.Do(func() { close(release) }) }
 			t.Cleanup(stop)
 			check := func(int64) error { return nil }
+			offline := errors.New("temporarily offline")
+			cache := &warmupStoreHook{FileCache: svc.fileCache.(*diskcache.FileCache)}
+			svc.fileCache = cache
+			if scenario == "store_failure" {
+				cache.store = func() error { return errors.New("cache write failed") }
+			}
 			if scenario == "foreground_before_permit" {
 				check = func(int64) error {
 					close(entered)
@@ -93,14 +101,34 @@ func TestWarmupJoinsAndCancellation(t *testing.T) {
 				}
 			} else {
 				svc.testHooks = &previewTestHooks{beforeGenerate: func() {
-					close(entered)
+					// A foreground retry can also enter this hook.
+					select {
+					case <-entered:
+					default:
+						close(entered)
+					}
 					<-release
 				}}
 			}
 			bgCtx, cancelWarmup := context.WithCancel(t.Context())
 			defer cancelWarmup()
 			warmDone := make(chan error, 1)
-			go func() { warmDone <- testWarm(t, bgCtx, svc, file, check) }()
+			go func() {
+				if scenario != "source_check_failure" {
+					warmDone <- testWarm(t, bgCtx, svc, file, check)
+					return
+				}
+				stored := false
+				cache.store = func() error { stored = true; return nil }
+				open := func(context.Context) (*os.File, error) { return os.Open(file.RealPath) }
+				stat := func(context.Context) (os.FileInfo, error) {
+					if stored {
+						return nil, offline
+					}
+					return os.Stat(file.RealPath)
+				}
+				warmDone <- svc.WarmPreviewWhenIdle(bgCtx, file, open, stat, check)
+			}()
 			select {
 			case <-entered:
 			case err := <-warmDone:
@@ -139,6 +167,10 @@ func TestWarmupJoinsAndCancellation(t *testing.T) {
 				require.ErrorIs(t, err, context.Canceled)
 			case "foreground_before_permit":
 				require.ErrorIs(t, err, ErrPreviewBusy)
+			case "store_failure":
+				require.ErrorIs(t, err, ErrWarmupStore)
+			case "source_check_failure":
+				require.ErrorIs(t, err, offline)
 			default:
 				require.NoError(t, err)
 			}
@@ -147,7 +179,12 @@ func TestWarmupJoinsAndCancellation(t *testing.T) {
 				require.NoError(t, result.err)
 				require.NotEmpty(t, result.data)
 			}
-			require.EqualValues(t, 1, svc.stats.fullDecodes.Load())
+			if scenario == "source_check_failure" {
+				require.EqualValues(t, 2, svc.stats.fullDecodes.Load(), "foreground retried through its own source check")
+				require.Zero(t, svc.stats.storeFailures.Load())
+			} else {
+				require.EqualValues(t, 1, svc.stats.fullDecodes.Load())
+			}
 		})
 	}
 }
@@ -216,4 +253,18 @@ func TestWarmupRejectsOverBudgetBeforeDecode(t *testing.T) {
 	file.Source = sample.Source
 	require.ErrorIs(t, testWarm(t, t.Context(), svc, file, func(int64) error { return nil }), ErrPreviewOverBudget)
 	require.Zero(t, svc.stats.fullDecodes.Load())
+}
+
+type warmupStoreHook struct {
+	*diskcache.FileCache
+	store func() error
+}
+
+func (c *warmupStoreHook) Store(ctx context.Context, key string, data []byte) error {
+	if c.store != nil {
+		if err := c.store(); err != nil {
+			return err
+		}
+	}
+	return c.FileCache.Store(ctx, key, data)
 }

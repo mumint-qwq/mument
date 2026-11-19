@@ -153,11 +153,10 @@ func StartFilebrowser() {
 	validateAccessRules()
 	validateShareInfo()
 	// Start the rootCMD in a goroutine
+	var warmupDrainErr error
 	go func() {
-		if err := rootCMD(ctx, &serverConfig, runtimeApp, shutdownComplete); err != nil {
-			logger.Fatalf("Error starting filebrowser: %v", err)
-		}
-		close(done) // Signal that the server has stopped
+		warmupDrainErr = rootCMD(ctx, &serverConfig, runtimeApp, shutdownComplete)
+		close(done)
 	}()
 	// Wait for a shutdown signal or the server to stop
 	select {
@@ -169,10 +168,15 @@ func StartFilebrowser() {
 	}
 
 	httpResult := <-shutdownComplete
-	<-done // rootCMD has drained preview warmup before dependencies can close.
+	<-done // rootCMD has reported the bounded warmup drain result.
 	if !httpResult.Drained {
 		logger.Errorf("HTTP shutdown did not drain cleanly: %d handler(s) still active (error: %v)",
 			httpResult.ActiveHandlers, httpResult.HTTPError)
+	}
+
+	if warmupDrainErr != nil {
+		logger.Errorf("preview warmup did not drain: %v (leaving preview service, ledger, index database and caches open)", warmupDrainErr)
+		return
 	}
 
 	var stopErr error
@@ -280,16 +284,16 @@ func rootCMD(ctx context.Context, serverConfig *settings.Server, a *app.App, shu
 	icons.InitializePWAManifest()
 
 	workerCtx, cancelWorker := context.WithCancel(ctx)
+	defer cancelWorker()
 	warmup := previewwarmup.New(workerCtx, *serverConfig, indexing.GetIndexDB(), preview.GetService())
-	defer func() {
-		cancelWorker()
-		warmup.Wait()
-	}()
 	web.StartHttp(ctx, web.Deps{
 		Store:         a.Store,
 		Files:         a.Files,
 		Auth:          a.Auth,
 		PreviewWarmup: warmup,
 	}, shutdownComplete)
-	return nil
+	cancelWorker()
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDrain()
+	return warmup.Wait(drainCtx)
 }

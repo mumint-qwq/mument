@@ -49,7 +49,7 @@ func TestPreviewWarmupHTTPHandlers(t *testing.T) {
 	runtimeDeps.PreviewWarmup = worker
 	t.Cleanup(func() {
 		cancel()
-		worker.Wait()
+		require.NoError(t, worker.Wait(context.Background()))
 		runtimeDeps.PreviewWarmup = previous
 	})
 	getStatus := func() previewwarmup.Status {

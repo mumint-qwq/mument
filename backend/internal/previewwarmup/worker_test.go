@@ -4,6 +4,7 @@ package previewwarmup
 
 import (
 	"context"
+	"database/sql"
 	"image"
 	"image/jpeg"
 	"math/rand"
@@ -16,6 +17,7 @@ import (
 	indexsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
 	"github.com/stretchr/testify/require"
 )
@@ -218,10 +220,144 @@ func TestWarmupProcessesAndRecoversBoundedProgress(t *testing.T) {
 func TestWarmupDisabledDoesNotPrepareIndex(t *testing.T) {
 	db, _, _ := warmupTestIndex(t)
 	w := New(t.Context(), settings.Server{}, db, nil)
-	w.Wait()
+	require.NoError(t, w.Wait(t.Context()))
 	require.False(t, w.Snapshot().Enabled)
 	require.Equal(t, "disabled", w.Snapshot().Reason)
 	var columns int
 	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('index_items') WHERE name LIKE 'warmup_%'").Scan(&columns))
 	require.Zero(t, columns)
+}
+
+type postStorePreview struct {
+	*preview.Service
+	afterStore func() error
+}
+
+func (p postStorePreview) WarmPreviewWhenIdle(ctx context.Context, file iteminfo.ExtendedFileInfo,
+	open func(context.Context) (*os.File, error), stat func(context.Context) (os.FileInfo, error), check func(int64) error) error {
+	return p.Service.WarmPreviewWhenIdle(ctx, file, open, func(ctx context.Context) (os.FileInfo, error) {
+		// This fixture has one thumbnail. Detection uses the actual cache
+		// write so it does not depend on how many preflight stats ran.
+		err := filepath.WalkDir(filepath.Join(p.WarmupCacheRoot(), "diskcache"), func(_ string, entry os.DirEntry, err error) error {
+			if err == nil && entry.Type().IsRegular() {
+				return p.afterStore()
+			}
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		return stat(ctx)
+	}, check)
+}
+
+func newPublicationTestWorker(t *testing.T, afterStore func() error) *Worker {
+	t.Helper()
+	db, idx, root := warmupTestIndex(t)
+	cache := t.TempDir()
+	require.NoError(t, preview.StartPreviewGeneratorWithBudget(1, 64, cache))
+	t.Cleanup(func() { require.NoError(t, preview.Shutdown(context.Background())) })
+	require.NoError(t, db.PreparePreviewWarmup(t.Context()))
+	pictures := filepath.Join(root, "Pictures")
+	photo := filepath.Join(pictures, "a.jpg")
+	makePhoto(t, photo, 1280, 1080)
+	require.NoError(t, idx.RefreshDirectory("/Pictures/", false))
+	return &Worker{
+		db: db, svc: postStorePreview{preview.GetService(), afterStore},
+		probe: fakePressure(t, cache), done: make(chan struct{}),
+		scopes: []scope{{config: settings.PreviewWarmupScope{Source: "library", Directory: "Pictures"},
+			sourceRoot: root, root: pictures, prefix: "/Pictures/"}},
+		status: Status{Scopes: []ScopeStatus{{Scope: 1}}},
+	}
+}
+
+func TestWarmupPostStoreSourceCheck(t *testing.T) {
+	for _, unavailable := range []error{errScopeOffline, errIndexNotReady, preview.ErrPreviewSourceChanged} {
+		t.Run(unavailable.Error(), func(t *testing.T) {
+			injected := unavailable
+			var replacement, original string
+			w := newPublicationTestWorker(t, func() error {
+				if replacement != "" {
+					next := replacement
+					replacement = ""
+					return os.Rename(next, original)
+				}
+				return injected
+			})
+			if unavailable == preview.ErrPreviewSourceChanged {
+				injected = nil
+				original = filepath.Join(w.scopes[0].root, "a.jpg")
+				replacement = filepath.Join(w.scopes[0].sourceRoot, "replacement.jpg")
+				makePhoto(t, replacement, 1281, 1080)
+			}
+			ctx := t.Context()
+			readProgress := func() (guard, warmed, attempts, retryAt int64) {
+				require.NoError(t, w.db.QueryRow("SELECT image_guard,warmup_guard,warmup_attempts,warmup_retry_at FROM index_items WHERE path='/Pictures/a.jpg'").
+					Scan(&guard, &warmed, &attempts, &retryAt))
+				return
+			}
+			repo, err := sql.Open(indexsql.SqliteDriver, filepath.Join(preview.GetService().WarmupCacheRoot(), "image-preview-ledger.sqlite"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, repo.Close()) })
+			cacheResults := func() int {
+				var results int
+				require.NoError(t, repo.QueryRowContext(ctx, "SELECT COUNT(*) FROM results").Scan(&results))
+				return results
+			}
+			initial, _, _, _ := readProgress()
+			outcome := w.step(ctx, 0, nil)
+			require.Zero(t, cacheResults())
+			guard, warmed, attempts, retryAt := readProgress()
+			require.Equal(t, initial, guard)
+			require.Zero(t, retryAt)
+			if unavailable == preview.ErrPreviewSourceChanged {
+				require.Equal(t, "version_changed", outcome)
+				require.Equal(t, guard, warmed)
+				require.EqualValues(t, -1, attempts)
+				require.Equal(t, "idle", w.step(ctx, 0, nil))
+				return
+			}
+			require.Equal(t, unavailable.Error(), outcome)
+			require.Zero(t, warmed)
+			require.Zero(t, attempts)
+			injected = nil
+			require.Equal(t, "generated", w.step(ctx, 0, nil))
+			require.Equal(t, 1, cacheResults())
+			guard, warmed, attempts, _ = readProgress()
+			require.Equal(t, initial, guard)
+			require.Equal(t, guard, warmed)
+			require.EqualValues(t, -1, attempts)
+		})
+	}
+}
+
+func TestWarmupDrainWithBlockedStat(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	w := newPublicationTestWorker(t, func() error {
+		close(entered)
+		<-release
+		return nil
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	go w.run(ctx)
+	defer func() {
+		cancel()
+		close(release)
+		drain, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		require.NoError(t, w.Wait(drain))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker never reached the blocked stat")
+	}
+	cancel()
+	deadline, stop := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer stop()
+	require.ErrorIs(t, w.Wait(deadline), context.DeadlineExceeded)
+	require.True(t, w.Snapshot().Active)
+	// The caller can still use the shared dependencies while the stat is stuck.
+	require.NoError(t, w.db.DB().Ping())
+	require.NotNil(t, preview.MoveLedger())
 }

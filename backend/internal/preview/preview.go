@@ -507,7 +507,11 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 
 	publishStart := time.Now()
 	ready, err := s.publishPreviewCache(ctx, cacheKey, publication, data, original, warmup)
-	if warmup != nil && errors.Is(err, ErrPreviewSourceChanged) {
+	var sourceCheck *previewSourceCheckError
+	if errors.As(err, &sourceCheck) {
+		if errors.Is(sourceCheck, ErrPreviewSourceChanged) {
+			s.stats.sourceChanged.Add(1)
+		}
 		return previewResult{}, err
 	}
 	if err != nil {
