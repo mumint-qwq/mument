@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import secrets
 import signal
 import socket
 import sqlite3
@@ -59,7 +60,7 @@ def ok(root, path, method="GET", body=None):
     return data
 
 
-def until(action, seconds=30):
+def until(action, seconds=30, interval=0.1):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
@@ -67,7 +68,7 @@ def until(action, seconds=30):
                 return result
         except (OSError, sqlite3.OperationalError, http.client.HTTPException):
             pass
-        time.sleep(0.1)
+        time.sleep(interval)
     raise TimeoutError("condition did not become true; inspect server log and final status")
 
 
@@ -105,7 +106,7 @@ def configure(root, inside, enabled):
                 "scopes": [{"source": "library", "directory": "Pictures"}],
             },
         },
-        "auth": {"methods": {"noauth": True}},
+        "auth": {"methods": {"noauth": True}, "adminPassword": secrets.token_urlsafe(24) + "aA1!"},
     }))
 
 
@@ -116,7 +117,7 @@ CGROUP_FILES = (
 
 
 @contextmanager
-def server(args, root, output, phase, enabled):
+def server(args, root, output, phase, enabled, crash=False):
     inside = Path("/run/mument-test") if args.image else root
     configure(root, inside, enabled)
     env = {key: value for key, value in os.environ.items() if not key.startswith("FILEBROWSER_")}
@@ -126,7 +127,7 @@ def server(args, root, output, phase, enabled):
     if args.image:
         command = [
             "docker", "run", "--pull", "never", "--name", name, "--network", "none",
-            "--cpus", "2", "--memory", "1g", "--memory-swap", "2g",
+            "--cpus", "2", "--memory", "1g", "--memory-swap", "2g", "--cgroupns", "private",
             "--user", f"{os.getuid()}:{os.getgid()}", "--env", "GOMAXPROCS=2",
             "--mount", f"type=bind,src={root},dst={inside}", args.image, *flags,
         ]
@@ -134,6 +135,7 @@ def server(args, root, output, phase, enabled):
         command = [str(args.binary), *flags]
     with (output / f"{phase}-server.log").open("wb") as log:
         proc = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env)
+        completed = False
         try:
             def healthy():
                 if proc.poll() is not None:
@@ -142,9 +144,12 @@ def server(args, root, output, phase, enabled):
 
             until(healthy)
             yield name if args.image else proc.pid
+            completed = True
         finally:
+            force = crash and completed
             if args.image:
-                subprocess.run(["docker", "stop", "-t", "15", name], capture_output=True, check=False)
+                stop = ["kill", "--signal", "KILL"] if force else ["stop", "-t", "15"]
+                subprocess.run(["docker", *stop, name], capture_output=True, check=False)
                 inspected = subprocess.run(
                     ["docker", "inspect", "--format", "{{json .State}}", name],
                     capture_output=True, text=True, check=False,
@@ -154,17 +159,18 @@ def server(args, root, output, phase, enabled):
                     (output / f"{phase}-container-state.json").write_text(json.dumps(state, indent=2))
                 subprocess.run(["docker", "rm", name], capture_output=True, check=False)
             elif proc.poll() is None:
-                proc.send_signal(signal.SIGTERM)
+                proc.send_signal(signal.SIGKILL if force else signal.SIGTERM)
             try:
                 proc.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
                 raise
-            if proc.returncode != 0:
-                raise RuntimeError(f"{phase} exited with code {proc.returncode}")
-            if args.image and inspected.returncode == 0:
-                assert not state["OOMKilled"] and state["ExitCode"] == 0, state
+            expected = (137 if args.image else -signal.SIGKILL) if force else 0
+            if completed and proc.returncode != expected:
+                raise RuntimeError(f"{phase} exited with code {proc.returncode}; expected {expected}")
+            if args.image and completed and inspected.returncode == 0:
+                assert not state["OOMKilled"] and state["ExitCode"] == expected, state
 
 
 def sample_runtime(args, handle, output, phase):
@@ -206,7 +212,7 @@ def run_smoke(args, output, root):
     with server(args, root, output, "enabled", True):
         until(lambda: len(ledger(root)) == 1, seconds=45)
         before = ledger(root)
-        assert before[0][0].split("/")[3] == "1024x1024" and before[0][-1] == 0
+        assert "/1024x1024/" in before[0][0] and before[0][-1] == 0
         assert control(root)["fullDecodes"] == 1
         data = preview(root, "/Pictures/first.png")
         assert hashlib.sha256(data).hexdigest() == before[0][1]
@@ -230,6 +236,26 @@ def run_smoke(args, output, root):
         assert any(row[1] == before[0][1] and row[2] == before[0][2] for row in ledger(root))
         (output / "smoke-status.json").write_text(json.dumps(state, indent=2))
         sample_runtime(args, handle, output, "restart")
+
+
+def run_interruption(args, output, root):
+    fixtures(root)
+    data = png(seed=87)
+    for index in range(8):
+        photo = root / f"source/Pictures/interrupt-{index:02d}.png"
+        photo.write_bytes(data)
+        os.utime(photo, (time.time() - 30,) * 2)
+    with server(args, root, output, "killed-during-work", True, crash=True):
+        active = until(lambda: (value if (value := control(root))["active"] else None),
+                       seconds=45, interval=0.01)
+        (output / "interruption-status.json").write_text(json.dumps(active, indent=2))
+    published = ledger(root)
+    with server(args, root, output, "recover-after-kill", True):
+        until(lambda: len(ledger(root)) == 9, seconds=45)
+        recovered = ledger(root)
+        assert all(row in recovered for row in published)
+        assert all(row[-1] == 0 for row in recovered)
+        (output / "recovery-status.json").write_text(json.dumps(control(root), indent=2))
 
 
 def run_comparison(args, output, root, enabled):
@@ -277,6 +303,7 @@ def main():
     mode.add_argument("--binary", type=lambda value: Path(value).resolve())
     mode.add_argument("--image", help="prebuilt local mument candidate tag or image ID")
     parser.add_argument("--output", required=True, type=lambda value: Path(value).resolve())
+    parser.add_argument("--interrupt", action="store_true", help="kill a scratch process while the worker is active")
     parser.add_argument("--compare", action="store_true", help="collect the fixed on/off workload and runtime counters")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -289,6 +316,9 @@ def main():
     (args.output / "candidate-identity").write_text(identity + "\n")
     with tempfile.TemporaryDirectory(prefix="007d-") as scratch:
         run_smoke(args, args.output, Path(scratch))
+    if args.interrupt:
+        with tempfile.TemporaryDirectory(prefix="007d-") as scratch:
+            run_interruption(args, args.output, Path(scratch))
     if args.compare:
         for enabled in (False, True):
             with tempfile.TemporaryDirectory(prefix="007d-") as scratch:
