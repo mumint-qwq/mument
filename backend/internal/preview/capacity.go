@@ -319,21 +319,15 @@ func ControlPreviewCapacity(pause bool) error {
 
 // A foreground delivery can regenerate bytes while the old publication awaits
 // recovery. Record that demand without publishing over its isolated object.
-func (s *Service) recordCapacityDemand(ctx context.Context, plan *ledgerPreview) {
-	now := time.Now()
-	// Keep the conservative in-process protection if recording use fails.
-	s.capacity.rememberUsageFailure(plan.key, now)
+func (s *Service) recordCapacityDemand(ctx context.Context, plan *ledgerPreview) error {
 	unlock, err := s.orphans.lockKey(ctx, plan.key)
 	if err != nil {
-		return
+		return err
 	}
 	defer unlock()
-	pending, err := s.ledger.PendingCapacityPublication(ctx, plan.key)
-	if err != nil || !pending {
-		return
-	}
 	old, found, err := s.ledger.Lookup(ctx, plan.ref, plan.variant)
-	if err == nil && found {
-		_ = s.ledger.Touch(ctx, plan.ref, plan.variant, old, now)
+	if err != nil || !found {
+		return err
 	}
+	return s.ledger.Touch(ctx, plan.ref, plan.variant, old, time.Now())
 }

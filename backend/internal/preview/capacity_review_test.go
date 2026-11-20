@@ -178,6 +178,7 @@ func testForegroundIsolation(t *testing.T, room bool) {
 	require.NoError(t, err)
 	require.Equal(t, intent.Publications, cacheledger.OrphanPublicationSet(pubs))
 	require.Positive(t, pubs[0].LastUsed)
+	require.Zero(t, m.uncertainUsage[keyStripe(plan.key)].Load())
 	// Restart before recovery so restored demand must survive in the ledger.
 	require.NoError(t, f.s.Shutdown(t.Context()))
 	f.start(t)

@@ -377,7 +377,9 @@ func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, resul
 	}
 	var deferred *SpaceDeferred
 	if foreground && errors.As(result.spaceErr, &deferred) && deferred.reason == "capacity_recovery" {
-		s.recordCapacityDemand(ctx, plan)
+		if err := s.recordCapacityDemand(ctx, plan); err != nil {
+			s.capacity.rememberUsageFailure(plan.key, time.Now())
+		}
 	}
 	if foreground && result.ready.Key != "" {
 		now := time.Now()
