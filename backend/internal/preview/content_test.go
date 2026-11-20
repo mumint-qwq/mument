@@ -269,3 +269,35 @@ func TestContentForegroundGenerationWinsDuringHash(t *testing.T) {
 	require.Equal(t, "already_proven", out.Reason)
 	require.Zero(t, out.Bytes)
 }
+
+func TestContentSameSizeMiddleMismatchKeepsOwnProof(t *testing.T) {
+	f := startOrphanFixture(t)
+	source := iteminfo.ExtendedFileInfo{Source: "orphan-test", RealPath: f.source, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: "source.jpg", Type: "image/jpeg", HasPreview: true}}}
+	_, err := reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	bytes, err := os.ReadFile(source.RealPath)
+	require.NoError(t, err)
+	bytes[len(bytes)/2] ^= 1
+	stat, err := os.Stat(source.RealPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(filepath.Join(f.root, "other"), 0700))
+	target := source
+	target.RealPath = filepath.Join(f.root, "other", "source.jpg")
+	require.NoError(t, os.WriteFile(target.RealPath, bytes, 0600))
+	require.NoError(t, os.Chtimes(target.RealPath, stat.ModTime(), stat.ModTime()))
+	out, err := reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "candidate_mismatch", out.Reason)
+	require.EqualValues(t, len(bytes), out.Bytes)
+	plan, err := f.s.planLedgerPreview(t.Context(), target, "small")
+	require.NoError(t, err)
+	require.NotEqual(t, f.ref.Asset, plan.ref.Asset)
+	proof, known, err := f.s.ledger.KnownContent(t.Context(), plan.ref)
+	require.NoError(t, err)
+	require.True(t, known)
+	require.Equal(t, cacheledger.Digest(bytes), proof.Digest)
+	out, err = reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "candidate_mismatch", out.Reason)
+	require.Zero(t, out.Bytes, "completed target proof must not be read again for candidate comparison")
+}

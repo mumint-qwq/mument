@@ -61,4 +61,7 @@ func TestContentWorkerDisabledHasNoWork(t *testing.T) {
 	require.NoError(t, w.Wait(t.Context()))
 	require.False(t, w.Snapshot().Enabled)
 	require.Zero(t, w.Snapshot().ReadBytes)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.NoError(t, w.Wait(cancelled))
 }

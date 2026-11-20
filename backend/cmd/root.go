@@ -175,7 +175,7 @@ func StartFilebrowser() {
 	}
 
 	if warmupDrainErr != nil {
-		logger.Errorf("preview warmup did not drain: %v (leaving preview service, ledger, index database and caches open)", warmupDrainErr)
+		logger.Errorf("preview background workers did not drain: %v (leaving preview service, ledger, index database and caches open)", warmupDrainErr)
 		return
 	}
 

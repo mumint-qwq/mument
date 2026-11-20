@@ -78,6 +78,11 @@ func (w *ReuseWorker) Wait(ctx context.Context) error {
 	select {
 	case <-w.done:
 		return nil
+	default:
+	}
+	select {
+	case <-w.done:
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -111,7 +116,7 @@ func (w *ReuseWorker) allow(ctx context.Context) error {
 		return preview.ErrPreviewBusy
 	}
 	if err := w.svc.ContentCacheReady(ctx); err != nil {
-		return err
+		return errScopeOffline
 	}
 	if err := w.svc.WarmupSpace(); err != nil {
 		return err
@@ -243,6 +248,13 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 	}
 	out, err := w.svc.ReuseContent(ctx, iteminfo.ExtendedFileInfo{Source: s.config.Source, RealPath: full, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: filepath.Base(full), Type: c.Type, HasPreview: true}}}, g.open, stat, pace)
 	if err != nil {
+		// A vanished/replaced scope is a deferral, including failures found
+		// after the fd read. It must not exhaust a file's I/O retry budget.
+		if ctx.Err() == nil {
+			if _, scopeErr := s.online(); scopeErr != nil || proof.Check() != nil {
+				err = errScopeOffline
+			}
+		}
 		switch {
 		case ctx.Err() != nil, errors.Is(err, preview.ErrPreviewBusy), errors.Is(err, errScopeOffline), errors.Is(err, errIndexNotReady), errors.Is(err, errCPUThrottled), errors.Is(err, errMemoryPressure), errors.Is(err, errPressureUnavailable), errors.Is(err, errLowSpace), errors.Is(err, diskcache.ErrReclaimScope), preview.IsSpaceDeferred(err):
 			_ = w.repo.DeferContentWork(ctx, key, c.Path, c.Version)

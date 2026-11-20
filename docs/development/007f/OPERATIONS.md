@@ -1,7 +1,7 @@
 # 007-F candidate configuration
 
-This branch is an isolated development candidate. Production still runs 007-B;
-no deployment, enablement, real gallery testing, push or merge is performed here.
+This branch is an isolated development candidate. The task handoff records production as 007-B; Docker runtime was not independently
+verified here. No deployment, enablement, real gallery testing, push or merge is performed here.
 
 ```yaml
 server:
