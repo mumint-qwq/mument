@@ -107,3 +107,8 @@ rules rely on the strong filesystem version contract used by C/E (including
 nanosecond ctime and physical identity); stat-indistinguishable privileged edits
 are outside that contract. The mutation fixture crosses the filesystem's
 metadata timestamp update quantum before injecting an in-place edit.
+
+F enables the existing browse-activity signal even when D is disabled. Ordinary
+and paged handlers already bracket their work with `TrackWarmupBrowse`; enabling
+this shared signal makes F yield for those requests and for the quiet interval
+afterward. It does not start D or change directory response generation.

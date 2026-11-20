@@ -68,6 +68,7 @@ func NewReuse(ctx context.Context, server settings.Server, db *indexsql.IndexDB,
 		close(w.done)
 		return w
 	}
+	svc.EnableWarmupHints() // Directory activity must preempt F even when D is off.
 	w.probe = newResourceProbe(svc.WarmupCacheRoot())
 	w.status.Reason = "starting"
 	go w.run(ctx)
