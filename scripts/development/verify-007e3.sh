@@ -11,7 +11,12 @@ out=$(cd "$1" && pwd)
 scratch=$(mktemp -d)
 image=''
 container=''
+embed=''
 cleanup() {
+  if [[ -n $embed ]]; then
+    rm -- "$embed"
+    rmdir -- "$(dirname "$embed")" 2>/dev/null || true
+  fi
   if [[ -n $container ]]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
@@ -86,6 +91,15 @@ record e3-race "$go_cmd" -C "$root/backend" test -race -count=1 -v -run '^(TestS
   ./internal/preview ./internal/adapters/fs/diskcache ./internal/cacheledger ./internal/previewwarmup
 record e2-regression "$root/scripts/development/verify-007e2.sh" "$out/e2"
 record settings "$go_cmd" -C "$root/backend" test -race -count=1 ./pkg/settings
+
+embed_dir="$root/backend/internal/web/embed"
+if ! compgen -G "$embed_dir/*" >/dev/null; then
+  mkdir -p -- "$embed_dir"
+  embed=$(mktemp "$embed_dir/e3-placeholder-XXXXXX")
+  printf 'Synthetic E3 handler test embed\n' > "$embed"
+fi
+record admin-http env MUMENT_MOVE_HANDLER_TRANSPORT=1 "$go_cmd" -C "$root/backend" \
+  test -race -count=1 -run '^TestPreviewSpaceHTTPHandlers$' -v ./internal/web
 
 for older in e2 d; do
   if [[ $older == e2 ]]; then
