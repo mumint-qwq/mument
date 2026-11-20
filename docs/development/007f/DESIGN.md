@@ -112,3 +112,12 @@ F enables the existing browse-activity signal even when D is disabled. Ordinary
 and paged handlers already bracket their work with `TrackWarmupBrowse`; enabling
 this shared signal makes F yield for those requests and for the quiet interval
 afterward. It does not start D or change directory response generation.
+
+`content_empty` proves that an asset was created after F's additive schema and
+has never published a result. Asset/result triggers also execute for old E3
+writers. Binding requires this marker and the target token's own durable full
+proof, not merely the present absence of result rows. A previously published
+asset whose last variant was evicted cannot be rebound to a duplicate asset;
+this preserves its cooldown and avoids implicit historical merging. Empty assets
+from before F without this provenance stay on their ordinary demand path. No
+startup history scan attempts to manufacture unpublished provenance.

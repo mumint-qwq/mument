@@ -29,6 +29,16 @@ END;
 CREATE TRIGGER IF NOT EXISTS content_ready_remove AFTER DELETE ON results BEGIN
  DELETE FROM content_ready WHERE asset=OLD.asset AND NOT EXISTS(SELECT 1 FROM results WHERE asset=OLD.asset);
 END;
+CREATE TABLE IF NOT EXISTS content_empty (asset TEXT PRIMARY KEY REFERENCES assets(id));
+CREATE TRIGGER IF NOT EXISTS content_new_asset AFTER INSERT ON assets BEGIN
+ INSERT OR IGNORE INTO content_empty VALUES(NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS content_published_insert AFTER INSERT ON results BEGIN
+ DELETE FROM content_empty WHERE asset=NEW.asset;
+END;
+CREATE TRIGGER IF NOT EXISTS content_published_update AFTER UPDATE ON results BEGIN
+ DELETE FROM content_empty WHERE asset=NEW.asset;
+END;
 CREATE TABLE IF NOT EXISTS content_scopes (scope TEXT PRIMARY KEY, identity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS content_work (
  scope TEXT NOT NULL, path TEXT NOT NULL, version TEXT NOT NULL,
@@ -153,10 +163,12 @@ func (r *Repository) BindContent(ctx context.Context, ref Ref, p ContentProof, w
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM content_proofs p JOIN results r ON r.asset=p.asset
  WHERE p.asset=? AND p.algorithm=? AND p.bytes=? AND p.digest=? AND r.variant=? AND r.storage_key=? AND r.digest=? AND r.generated_at=?)
  AND NOT EXISTS(SELECT 1 FROM results WHERE asset=?)
+ AND EXISTS(SELECT 1 FROM content_empty WHERE asset=?)
+ AND EXISTS(SELECT 1 FROM content_proofs WHERE asset=? AND algorithm=? AND bytes=? AND digest=?)
  AND NOT EXISTS(SELECT 1 FROM moves WHERE state='pending' AND ((source=? AND path=?) OR (target_source=? AND target_path=?)))
  AND NOT EXISTS(SELECT 1 FROM orphan_intents WHERE storage_key IN (SELECT storage_key FROM results WHERE asset=?) AND state<>'removed')
  AND NOT EXISTS(SELECT 1 FROM capacity_intents WHERE storage_key IN (SELECT storage_key FROM results WHERE asset=?) AND state<>'removed')`,
-		p.Asset, ContentAlgorithm, p.Bytes, p.Digest, witness.Variant, witness.Key, witness.Digest, witness.GeneratedAt, ref.Asset, ref.Source, ref.Path, ref.Source, ref.Path, p.Asset, p.Asset).Scan(&yes)
+		p.Asset, ContentAlgorithm, p.Bytes, p.Digest, witness.Variant, witness.Key, witness.Digest, witness.GeneratedAt, ref.Asset, ref.Asset, ref.Asset, ContentAlgorithm, p.Bytes, p.Digest, ref.Source, ref.Path, ref.Source, ref.Path, p.Asset, p.Asset).Scan(&yes)
 	if err != nil {
 		return err
 	}

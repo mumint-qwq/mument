@@ -82,6 +82,9 @@ func TestContentSharingCASAndForegroundWins(t *testing.T) {
 	results, err := r.ContentResults(ctx, a.Asset)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
+	targetProof := proof
+	targetProof.Asset = b.Asset
+	require.NoError(t, r.ProveContent(ctx, b, targetProof))
 	require.NoError(t, r.BindContent(ctx, b, proof, results[0]))
 	shared, err := r.FindRef(ctx, "disk", "/copy", v)
 	require.NoError(t, err)
@@ -100,6 +103,8 @@ func TestContentSharingCASAndForegroundWins(t *testing.T) {
 	v.Ino++
 	c, err := r.Resolve(ctx, "disk", "/raced", v)
 	require.NoError(t, err)
+	targetProof.Asset = c.Asset
+	require.NoError(t, r.ProveContent(ctx, c, targetProof))
 	_, err = r.Publish(ctx, c, "small", "own", []byte("own"))
 	require.NoError(t, err)
 	require.ErrorIs(t, r.BindContent(ctx, c, proof, results[0]), ErrStale)
@@ -154,6 +159,9 @@ func TestContentBindingWaitsForReclamation(t *testing.T) {
 			require.NoError(t, e)
 			results, e := r.ContentResults(t.Context(), src.Asset)
 			require.NoError(t, e)
+			targetProof := p
+			targetProof.Asset = target.Asset
+			require.NoError(t, r.ProveContent(t.Context(), target, targetProof))
 			_, e = r.db.Exec("INSERT INTO " + table + "(id,storage_key,publications,expected,logical,blocks,state) VALUES('intent','key','pubs','stamp',4,512,'isolated')")
 			require.NoError(t, e)
 			require.ErrorIs(t, r.BindContent(t.Context(), target, p, results[0]), ErrStale)
@@ -162,4 +170,36 @@ func TestContentBindingWaitsForReclamation(t *testing.T) {
 			require.NoError(t, r.BindContent(t.Context(), target, p, results[0]))
 		})
 	}
+}
+
+func TestContentNeverRebindsPreviouslyPublishedEmptyAsset(t *testing.T) {
+	r := testRepository(t)
+	v := Version{Size: 100, MtimeNS: 1, CtimeNS: 2, Dev: 1, Ino: 3, Strong: true}
+	target, e := r.Resolve(t.Context(), "disk", "/target", v)
+	require.NoError(t, e)
+	result, e := r.Publish(t.Context(), target, "small", "old", []byte("old"))
+	require.NoError(t, e)
+	proof := ContentProof{Asset: target.Asset, Bytes: 100, Digest: Digest([]byte("original"))}
+	require.NoError(t, r.ProveContent(t.Context(), target, proof))
+	_, e = r.Reject(t.Context(), target, "small", result)
+	require.NoError(t, e)
+	v.Ino++
+	source, e := r.Resolve(t.Context(), "disk", "/source", v)
+	require.NoError(t, e)
+	_, e = r.Publish(t.Context(), source, "small", "usable", []byte("usable"))
+	require.NoError(t, e)
+	proof.Asset = source.Asset
+	require.NoError(t, r.ProveContent(t.Context(), source, proof))
+	results, e := r.ContentResults(t.Context(), source.Asset)
+	require.NoError(t, e)
+	// A result disappearing does not turn an old asset into a provably unpublished
+	// token. Its cooldown/history must stay associated with its own asset.
+	require.ErrorIs(t, r.BindContent(t.Context(), target, proof, results[0]), ErrStale)
+	fresh, e := r.Resolve(t.Context(), "disk", "/fresh", v)
+	require.NoError(t, e)
+	require.ErrorIs(t, r.BindContent(t.Context(), fresh, proof, results[0]), ErrStale, "target must have its own complete durable proof")
+	targetProof := proof
+	targetProof.Asset = fresh.Asset
+	require.NoError(t, r.ProveContent(t.Context(), fresh, targetProof))
+	require.NoError(t, r.BindContent(t.Context(), fresh, proof, results[0]))
 }
