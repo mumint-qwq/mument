@@ -96,6 +96,9 @@ func Open(path string) (*Repository, error) {
 	if err = initOrphanIntents(tx); err != nil {
 		return nil, errors.Join(err, tx.Rollback(), db.Close())
 	}
+	if err = initCapacityIntents(tx); err != nil {
+		return nil, errors.Join(err, tx.Rollback(), db.Close())
+	}
 	var count, version int
 	if err = tx.QueryRow("SELECT COUNT(*),MAX(version) FROM ledger_schema").Scan(&count, &version); err != nil {
 		return nil, errors.Join(err, tx.Rollback(), db.Close())

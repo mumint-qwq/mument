@@ -3,6 +3,7 @@ package preview
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -275,6 +276,12 @@ func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledger
 		return previewResult{}, false, nil
 	}
 	if !found || !result.Matches(data) {
+		if s.capacity != nil {
+			pending, err := s.ledger.PendingCapacityPublication(ctx, key)
+			if err != nil || pending {
+				return previewResult{}, false, nil
+			}
+		}
 		if s.space != nil && s.space.cfg.Mode == "enforce" &&
 			(s.space.tree == nil || s.space.tree.Check(false) != nil) {
 			return previewResult{}, false, nil
@@ -312,6 +319,15 @@ func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *led
 	}
 	if original || plan.ref.Asset == "" {
 		return cacheledger.Result{}, nil
+	}
+	if s.capacity != nil {
+		pending, err := s.ledger.PendingCapacityPublication(ctx, key)
+		if err != nil {
+			return cacheledger.Result{}, err
+		}
+		if pending {
+			return cacheledger.Result{}, &SpaceDeferred{"capacity_recovery"}
+		}
 	}
 	if err := s.storePreview(ctx, key, data, background); err != nil {
 		return cacheledger.Result{}, err
@@ -358,6 +374,10 @@ func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, resul
 			s.stats.sourceChanged.Add(1)
 			return nil, err
 		}
+	}
+	var deferred *SpaceDeferred
+	if foreground && errors.As(result.spaceErr, &deferred) && deferred.reason == "capacity_recovery" {
+		s.recordCapacityDemand(ctx, plan)
 	}
 	if foreground && result.ready.Key != "" {
 		now := time.Now()

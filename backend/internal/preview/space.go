@@ -154,6 +154,8 @@ func (s *Service) WarmupSpace() error {
 }
 
 func (m *spaceManager) poll(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var sample diskcache.SpaceSample
 	var err error
 	if m.bindErr != nil {
@@ -163,8 +165,6 @@ func (m *spaceManager) poll(now time.Time) {
 	} else {
 		sample, err = m.tree.SpaceSample()
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err != nil {
 		m.fsReason = diskcache.ReclaimReason(err)
 		m.status.Complete = false
@@ -331,13 +331,29 @@ func saturatingAdd(a, b int64) int64 {
 	return a + b
 }
 
-type spaceReservation struct{ bytes int64 }
+type spaceReservation struct{ bytes, block int64 }
 
-func (m *spaceManager) reserve(sample diskcache.SpaceSample, payload int64, background bool) (spaceReservation, error) {
-	const inodes = 3 // temporary file and up to two new shard directories
-	now := m.now()
+// Sampling and admission share mu with reservation settlement and polling.
+// A completed writer cannot release its charge between statfs and admission.
+func (m *spaceManager) reserve(payload int64, background bool) (spaceReservation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	sample, err := m.tree.SpaceSample()
+	if err != nil {
+		m.status.Complete = false
+		m.fsReason = diskcache.ReclaimReason(err)
+		m.status.InventoryReason = m.fsReason
+		m.evaluate(m.now())
+		m.requestInventory()
+		return spaceReservation{}, &SpaceDeferred{m.fsReason}
+	}
+	return m.reserveSample(sample, payload, background)
+}
+
+// reserveSample requires mu. Synthetic watermark tests supply their own sample.
+func (m *spaceManager) reserveSample(sample diskcache.SpaceSample, payload int64, background bool) (spaceReservation, error) {
+	const inodes = 3 // temporary file and up to two new shard directories
+	now := m.now()
 	s := &m.status
 	s.Filesystem, s.FilesystemAt = sample, now.UTC()
 	m.fsReason = ""
@@ -380,7 +396,7 @@ func (m *spaceManager) reserve(sample diskcache.SpaceSample, payload int64, back
 	s.ReservedInodes += inodes
 	m.revision++
 	m.evaluate(now)
-	return spaceReservation{reserved}, nil
+	return spaceReservation{reserved, sample.Block}, nil
 }
 
 func (m *spaceManager) finish(res spaceReservation, payload int64, allocated int64, err error) {
@@ -472,23 +488,12 @@ func (s *Service) storePreview(ctx context.Context, key string, bytes []byte, ba
 	if !ok {
 		return &SpaceDeferred{"scope_unavailable"}
 	}
-	sample, err := m.tree.SpaceSample()
-	if err != nil {
-		m.mu.Lock()
-		m.status.Complete = false
-		m.fsReason = diskcache.ReclaimReason(err)
-		m.status.InventoryReason = m.fsReason
-		m.evaluate(m.now())
-		m.requestInventory()
-		m.mu.Unlock()
-		return &SpaceDeferred{diskcache.ReclaimReason(err)}
-	}
-	reservation, err := m.reserve(sample, int64(len(bytes)), background)
+	reservation, err := m.reserve(int64(len(bytes)), background)
 	if err != nil {
 		return err
 	}
 	err = cache.StoreAt(ctx, m.tree, key, bytes)
-	allocated := reservation.bytes - 2*sample.Block
+	allocated := reservation.bytes - 2*reservation.block
 	if err == nil {
 		if object, err := m.tree.OpenKey(key); err == nil {
 			if stamp, err := object.Stamp(); err == nil {

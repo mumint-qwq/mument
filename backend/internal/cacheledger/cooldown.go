@@ -58,6 +58,6 @@ func (r *Repository) CooldownDue(ctx context.Context, source string, after Coold
 func (r *Repository) CapacityRecoveryPending(ctx context.Context, key string) (bool, error) {
 	var pending bool
 	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM capacity_intents WHERE storage_key=?
- AND state IN ('moving','isolated','removed'))`, key).Scan(&pending)
+ AND state IN ('moving','isolated','restoring','removed','held'))`, key).Scan(&pending)
 	return pending, err
 }

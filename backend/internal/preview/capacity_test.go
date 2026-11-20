@@ -153,6 +153,9 @@ func TestCapacityCrashChild(t *testing.T) {
 	indexing.SetTestIndex("orphan-test", f.root)
 	f.start(t)
 	m := testCapacity(t, f, time.Unix(0, nanos), true)
+	if phase == "restoring" || phase == "restored" {
+		require.True(t, m.space.endInventory(m.space.now(), 0, diskcache.Usage{}, nil))
+	}
 	m.orphan.checkpoint = func(stage string) error {
 		if phase == stage {
 			os.Exit(72)

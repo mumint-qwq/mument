@@ -27,9 +27,9 @@ func TestSpaceWatermarksAndReservations(t *testing.T) {
 	m.evaluate(now)
 	require.Equal(t, "healthy", m.status.State)
 
-	first, err := m.reserve(highFree, 2*spaceMiB, true)
+	first, err := m.reserveSample(highFree, 2*spaceMiB, true)
 	require.NoError(t, err)
-	_, err = m.reserve(highFree, 2*spaceMiB, false)
+	_, err = m.reserveSample(highFree, 2*spaceMiB, false)
 	require.ErrorContains(t, err, "budget_limit")
 	m.finish(first, 2*spaceMiB, 2*spaceMiB, nil)
 	require.Zero(t, m.status.ReservedBytes)

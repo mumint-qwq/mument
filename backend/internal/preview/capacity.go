@@ -109,7 +109,7 @@ func (m *capacityManager) policy(trial bool) reclaimPolicy {
 		qualify: func(ctx context.Context, key string, pubs []cacheledger.OrphanPublication, now time.Time, sample *OrphanSample) string {
 			return m.qualify(ctx, key, pubs, now, sample, trial)
 		},
-		intent: r.CapacityIntent, reserve: r.ReserveCapacity, phase: r.CapacityPhase, settle: r.SettleCapacity,
+		restored: r.RestoreCapacity, intent: r.CapacityIntent, reserve: r.ReserveCapacity, phase: r.CapacityPhase, settle: r.SettleCapacity,
 		restore: func(reason string) bool {
 			return reason == "space_recovered" || reason == "in_use" || reason == "recent_use"
 		},
@@ -315,4 +315,25 @@ func ControlPreviewCapacity(pause bool) error {
 		return nil
 	}
 	return errors.New("capacity eviction is unavailable")
+}
+
+// A foreground delivery can regenerate bytes while the old publication awaits
+// recovery. Record that demand without publishing over its isolated object.
+func (s *Service) recordCapacityDemand(ctx context.Context, plan *ledgerPreview) {
+	now := time.Now()
+	// Keep the conservative in-process protection if recording use fails.
+	s.capacity.rememberUsageFailure(plan.key, now)
+	unlock, err := s.orphans.lockKey(ctx, plan.key)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	pending, err := s.ledger.PendingCapacityPublication(ctx, plan.key)
+	if err != nil || !pending {
+		return
+	}
+	old, found, err := s.ledger.Lookup(ctx, plan.ref, plan.variant)
+	if err == nil && found {
+		_ = s.ledger.Touch(ctx, plan.ref, plan.variant, old, now)
+	}
 }

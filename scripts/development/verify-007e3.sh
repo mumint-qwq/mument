@@ -77,6 +77,8 @@ if [[ ${2-} == --container ]]; then
   exit
 fi
 
+record private-admission env MUMENT_SPACE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private \
+  "$out/e3-preview-tests" -test.run '^TestSpaceReview' -test.v -test.count=1
 record fs-binary env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath \
   -o "$scratch/e3-filesystem-tests" ./internal/adapters/fs/diskcache
 record private-space-mount env MUMENT_SPACE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private \

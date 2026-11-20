@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -21,13 +22,40 @@ END;
 CREATE TRIGGER IF NOT EXISTS capacity_record_use AFTER UPDATE OF last_used_at ON results BEGIN
  UPDATE capacity_entries SET used=NEW.last_used_at WHERE asset=NEW.asset AND variant=NEW.variant;
 END;
-CREATE TABLE IF NOT EXISTS capacity_intents ` + orphanIntentTable + `
+CREATE TABLE IF NOT EXISTS capacity_intents ` + capacityIntentTable + `
 CREATE UNIQUE INDEX IF NOT EXISTS capacity_intents_publication ON capacity_intents(storage_key,publications);
 CREATE TABLE IF NOT EXISTS capacity_audit (
  id TEXT PRIMARY KEY, object_id TEXT NOT NULL, reason TEXT NOT NULL, logical INTEGER NOT NULL, blocks INTEGER NOT NULL, finished INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS capacity_clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS capacity_cache_root (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL);
 `
+
+const capacityIntentTable = `(
+ scan_id INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, storage_key TEXT NOT NULL, publications TEXT NOT NULL,
+ expected TEXT NOT NULL, isolated TEXT NOT NULL DEFAULT '', logical INTEGER NOT NULL, blocks INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('reserved','moving','isolated','restoring','removed','held')));`
+
+// Keep pre-review E3 intent IDs, scan cursors and isolation names on upgrade.
+func initCapacityIntents(tx *sql.Tx) error {
+	var schema string
+	if err := tx.QueryRow("SELECT sql FROM sqlite_schema WHERE type='table' AND name='capacity_intents'").Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(schema, "'restoring'") {
+		return nil
+	}
+	_, err := tx.Exec(`CREATE TABLE capacity_intents_next ` + capacityIntentTable + `
+ INSERT INTO capacity_intents_next SELECT * FROM capacity_intents;
+ INSERT INTO sqlite_sequence(name,seq)
+ SELECT 'capacity_intents_next',seq FROM sqlite_sequence WHERE name='capacity_intents'
+ AND NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='capacity_intents_next');
+ UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='capacity_intents'),0))
+ WHERE name='capacity_intents_next';
+ DROP TABLE capacity_intents;
+ ALTER TABLE capacity_intents_next RENAME TO capacity_intents;
+ CREATE UNIQUE INDEX capacity_intents_publication ON capacity_intents(storage_key,publications);`)
+	return err
+}
 
 // BindPreviewSpaceRoot pins a durable cache root across service lifetimes.
 func (r *Repository) BindPreviewSpaceRoot(ctx context.Context, identity string) error {
@@ -207,4 +235,54 @@ func removeExactPublication(ctx context.Context, tx *sql.Tx, key string, p Orpha
 	return tx.ExecContext(ctx, `DELETE FROM results WHERE asset=? AND variant=? AND storage_key=? AND generated_at=?
  AND EXISTS(SELECT 1 FROM orphan_publications q WHERE q.asset=results.asset AND q.variant=results.variant AND q.epoch=?)`,
 		p.Asset, p.Variant, key, p.Generated, p.Epoch)
+}
+
+// RestoreCapacity retains the epoch and usage history while recording the
+// physical stamp produced by rename. Settlement and stamp changes are atomic.
+// Callers hold the physical key and location gates and verify the exact file.
+func (r *Repository) RestoreCapacity(ctx context.Context, i OrphanIntent, pubs []OrphanPublication, stamp string, now time.Time) error {
+	if OrphanPublicationSet(pubs) != i.Publications {
+		return ErrStale
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, p := range pubs {
+		result, err := tx.ExecContext(ctx, `UPDATE orphan_publications SET stamp=?
+ WHERE asset=? AND variant=? AND epoch=? AND stamp=? AND generated=?
+ AND EXISTS(SELECT 1 FROM results WHERE asset=? AND variant=? AND storage_key=? AND generated_at=? AND digest=? AND size=?)`,
+			stamp, p.Asset, p.Variant, p.Epoch, p.Stamp, p.Generated,
+			p.Asset, p.Variant, i.Key, p.Generated, p.Digest, p.Size)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil || n != 1 {
+			return errors.Join(ErrStale, err)
+		}
+	}
+	if err := settleIntent(ctx, tx, "capacity_audit", "capacity_intents", i, "capacity_restored", 0, 0, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PendingCapacityPublication is called under the key gate. Only an intent
+// bound to the current exact publication set protects a temporary absence.
+func (r *Repository) PendingCapacityPublication(ctx context.Context, key string) (bool, error) {
+	pubs, err := r.OrphanPublications(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	set := OrphanPublicationSet(pubs)
+	if set == "" {
+		return false, nil
+	}
+	i, err := r.CapacityIntent(ctx, key, set)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return i.ID != "" && i.State != "reserved", err
 }

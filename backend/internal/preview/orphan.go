@@ -129,6 +129,7 @@ type reclaimPolicy struct {
 	phase    func(context.Context, string, string, string) error
 	settle   func(context.Context, cacheledger.OrphanIntent, []cacheledger.OrphanPublication, string, int64, int64, time.Time) error
 	restore  func(string) bool
+	restored func(context.Context, cacheledger.OrphanIntent, []cacheledger.OrphanPublication, string, time.Time) error
 	eviction bool
 }
 
@@ -511,7 +512,7 @@ func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *Orp
 		}
 		return policy.hold(ctx, i, "publication_changed")
 	}
-	restore := policy.restore(protect)
+	restore := policy.restore(protect) || (policy.eviction && i.State == "restoring")
 	restoreReason := "reference_restored"
 	if policy.eviction {
 		restoreReason = "capacity_restored"
@@ -538,7 +539,26 @@ func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *Orp
 	if err != nil && !absent {
 		return diskcache.ReclaimReason(err)
 	}
-	if i.State == "removed" || (i.State == "isolated" && absent) {
+	if policy.eviction && absent && (i.State == "isolated" || i.State == "restoring") {
+		current, err := source.Stamp()
+		if err == nil {
+			if !old.SameRenamed(current) {
+				return policy.hold(ctx, i, "restoration_changed")
+			}
+			*budget -= current.Size
+			if err := withoutLocation(func() error { return source.Verify(ctx, current, pubs[0].Digest) }); err != nil {
+				return diskcache.ReclaimReason(err)
+			}
+			if err := policy.restored(ctx, i, pubs, stampJSON(current), now); err != nil {
+				return "ledger_error"
+			}
+			return restoreReason
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return diskcache.ReclaimReason(err)
+		}
+	}
+	if i.State == "removed" || ((i.State == "isolated" || i.State == "restoring") && absent) {
 		if !absent {
 			return policy.hold(ctx, i, "isolation_changed")
 		}
@@ -588,7 +608,7 @@ func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *Orp
 	if !old.SameRenamed(quarantined) {
 		return policy.hold(ctx, i, "isolation_changed")
 	}
-	if i.State == "isolated" {
+	if i.State == "isolated" || i.State == "restoring" {
 		var recorded diskcache.ObjectStamp
 		if json.Unmarshal([]byte(i.Isolated), &recorded) != nil || recorded != quarantined {
 			return policy.hold(ctx, i, "isolation_changed")
@@ -608,14 +628,35 @@ func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *Orp
 		}
 		pubs = current
 		protect = policy.qualify(ctx, i.Key, pubs, now, new(OrphanSample))
-		restore = policy.restore(protect)
+		restore = policy.restore(protect) || (policy.eviction && i.State == "restoring")
 		if protect != "" && !restore {
 			return protect
 		}
 	}
 	restoreObject := func() string {
+		if policy.eviction {
+			if err := policy.phase(ctx, i.ID, "restoring", stampJSON(quarantined)); err != nil {
+				return "ledger_error"
+			}
+			if o.interrupted("restoring") {
+				return "interrupted"
+			}
+		}
 		if err := isolated.Move(source, quarantined); err != nil {
 			return diskcache.ReclaimReason(err)
+		}
+		if policy.eviction {
+			if o.interrupted("restored") {
+				return "interrupted"
+			}
+			current, err := source.Stamp()
+			if err != nil {
+				return diskcache.ReclaimReason(err)
+			}
+			if err := policy.restored(ctx, i, pubs, stampJSON(current), now); err != nil {
+				return "ledger_error"
+			}
+			return restoreReason
 		}
 		return policy.finish(ctx, i, nil, restoreReason, 0, 0, now)
 	}
