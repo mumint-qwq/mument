@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/fileutils"
@@ -28,6 +29,7 @@ type observedMove struct {
 	info             os.FileInfo
 	after            os.FileInfo
 	copy             bool
+	exdev            bool
 	directoryVersion cacheledger.Version
 	outcome          cacheledger.RenameOutcome
 	targetMutation   *preview.OrphanMutation
@@ -81,6 +83,9 @@ func (s *Service) moveResources(batch *IndexImpactBatch, moves []ResourceMove) [
 				continue
 			}
 		}
+		if obs.copy && !m.Directory {
+			preview.HintCopiedContent(m.Target, m.To, obs.exdev)
+		}
 		s.finishMove(batch, obs.src, obs.dst, m.Directory, m.From, m.To, obs.directoryVersion)
 	}
 	return results
@@ -131,6 +136,7 @@ func (s *Service) renameResources(moves []ResourceMove, observations []observedM
 		}
 		if err != nil {
 			obs.copy = true
+			obs.exdev = errors.Is(err, syscall.EXDEV)
 		} else if m.Directory && before != nil && before.IsDir() {
 			after, err := os.Lstat(m.To)
 			_, sourceErr := os.Lstat(m.From)
