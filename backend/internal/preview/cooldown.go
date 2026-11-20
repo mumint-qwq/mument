@@ -24,7 +24,7 @@ type CooldownTarget struct {
 }
 
 func (s *Service) warmupCooldown(ctx context.Context, plan *ledgerPreview) error {
-	if s.capacity == nil || s.space.cfg.Mode != "enforce" {
+	if s.capacity == nil || s.space == nil || s.space.cfg.Mode != "enforce" {
 		return nil
 	}
 	until, err := s.ledger.CoolingUntil(ctx, plan.ref.Asset, plan.variant)
@@ -48,7 +48,7 @@ func (s *Service) warmupCooldown(ctx context.Context, plan *ledgerPreview) error
 // WarmupCooldownPage feeds a bounded D lane without changing any index guard.
 // A moved or unknown path waits for normal rediscovery or manual fill.
 func (s *Service) WarmupCooldownPage(ctx context.Context, source string, after cacheledger.CooldownCursor) ([]CooldownTarget, cacheledger.CooldownCursor, error) {
-	if s.capacity == nil || s.space.cfg.Mode != "enforce" {
+	if s.capacity == nil || s.space == nil || s.space.cfg.Mode != "enforce" {
 		return nil, cacheledger.CooldownCursor{}, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)

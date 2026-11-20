@@ -117,8 +117,10 @@ func (m *spaceManager) snapshot() SpaceStatus {
 
 func PreviewSpaceStatus() SpaceStatus {
 	result := SpaceStatus{Mode: "off", State: "disabled", Reason: "disabled"}
-	if s := service; s != nil && s.space != nil {
-		result = s.space.snapshot()
+	if s := service; s != nil {
+		if s.space != nil {
+			result = s.space.snapshot()
+		}
 		if s.capacity != nil {
 			result.CooldownSkips = s.capacity.cooldownSkips.Load()
 			result.CapacityPaused = s.capacity.paused.Load()

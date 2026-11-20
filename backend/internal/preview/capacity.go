@@ -178,15 +178,22 @@ func (m *capacityManager) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if m.space.cfg.Mode != "enforce" {
-				return
-			}
 			m.step(ctx, &cursor, &orphanOffered)
 		}
 	}
 }
 
 func (m *capacityManager) step(ctx context.Context, cursor *CapacityCursor, orphanOffered *bool) {
+	if m.space.cfg.Mode != "enforce" || !m.space.cfg.CapacityEviction {
+		report := m.recover(ctx, cursor.Intent)
+		cursor.Intent = report.Next.Intent
+		if len(report.Samples) != 0 || len(report.Reasons) != 0 {
+			m.last.Store(&report)
+		}
+		if m.space.cfg.Mode != "enforce" {
+			return
+		}
+	}
 	pressure := m.space.needsCapacity()
 	if !pressure && m.space.snapshot().State == "healthy" {
 		*orphanOffered = false
@@ -303,7 +310,7 @@ func (m *capacityManager) report(parent context.Context, cursor CapacityCursor, 
 }
 
 func PreviewCapacityStatus(ctx context.Context, cursor CapacityCursor) CapacityReport {
-	if s := service; s != nil && !s.closed.Load() && s.capacity != nil {
+	if s := service; s != nil && !s.closed.Load() && s.space != nil && s.capacity != nil {
 		return s.capacity.report(ctx, cursor, false)
 	}
 	return CapacityReport{OrphanReport: OrphanReport{Reasons: map[string]int{"tracking_unavailable": 1}}}
@@ -330,4 +337,45 @@ func (s *Service) recordCapacityDemand(ctx context.Context, plan *ledgerPreview)
 		return err
 	}
 	return s.ledger.Touch(ctx, plan.ref, plan.variant, old, time.Now())
+}
+
+// recover services durable obligations while new capacity eviction is disabled.
+// It only visits existing intentions and always requests restoration.
+func (m *capacityManager) recover(parent context.Context, after int64) CapacityReport {
+	ctx, cancel := context.WithTimeout(parent, orphanWindow)
+	defer cancel()
+	r := CapacityReport{OrphanReport: OrphanReport{Tracking: true, Reasons: make(map[string]int)}}
+	intents, err := m.orphan.repo.CapacityIntents(ctx, after)
+	if err != nil {
+		r.Reasons["ledger_error"]++
+		r.Next.Intent = after
+		return r
+	}
+	if len(intents) == 0 {
+		return r
+	}
+	if err := m.orphan.tree.Check(true); err != nil {
+		r.Reasons[diskcache.ReclaimReason(err)]++
+		r.Next.Intent = after
+		return r
+	}
+	policy := m.policy(false)
+	policy.qualify = func(context.Context, string, []cacheledger.OrphanPublication, time.Time, *OrphanSample) string {
+		return "space_recovered"
+	}
+	now := m.space.now()
+	// Recovery is independent of pressure and never scans fresh candidates.
+	budget := int64(orphanByteLimit)
+	for _, i := range intents {
+		if ctx.Err() != nil || budget < orphanMaxFile {
+			r.Next.Intent = after
+			return r
+		}
+		m.orphan.inspect(ctx, policy, &r.OrphanReport, i.Key, i, now, true, &budget)
+		after = i.Row
+	}
+	if len(intents) == cacheledger.OrphanPageSize {
+		r.Next.Intent = after
+	}
+	return r
 }

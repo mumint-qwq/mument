@@ -540,19 +540,9 @@ func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *Orp
 		return diskcache.ReclaimReason(err)
 	}
 	if policy.eviction && absent && (i.State == "isolated" || i.State == "restoring") {
-		current, err := source.Stamp()
+		_, err := source.Stamp()
 		if err == nil {
-			if !old.SameRenamed(current) {
-				return policy.hold(ctx, i, "restoration_changed")
-			}
-			*budget -= current.Size
-			if err := withoutLocation(func() error { return source.Verify(ctx, current, pubs[0].Digest) }); err != nil {
-				return diskcache.ReclaimReason(err)
-			}
-			if err := policy.restored(ctx, i, pubs, stampJSON(current), now); err != nil {
-				return "ledger_error"
-			}
-			return restoreReason
+			return o.finishCapacityRestore(ctx, policy, i, pubs, old, source, now, budget, withoutLocation)
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return diskcache.ReclaimReason(err)
@@ -649,14 +639,7 @@ func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *Orp
 			if o.interrupted("restored") {
 				return "interrupted"
 			}
-			current, err := source.Stamp()
-			if err != nil {
-				return diskcache.ReclaimReason(err)
-			}
-			if err := policy.restored(ctx, i, pubs, stampJSON(current), now); err != nil {
-				return "ledger_error"
-			}
-			return restoreReason
+			return o.finishCapacityRestore(ctx, policy, i, pubs, old, source, now, budget, withoutLocation)
 		}
 		return policy.finish(ctx, i, nil, restoreReason, 0, 0, now)
 	}
@@ -716,4 +699,33 @@ func (policy reclaimPolicy) finish(ctx context.Context, i cacheledger.OrphanInte
 		return "ledger_error"
 	}
 	return reason
+}
+
+// Both live rename and crash recovery establish the same proof before updating
+// the old epoch. Payload verification releases the C location gate.
+func (o *orphanManager) finishCapacityRestore(ctx context.Context, policy reclaimPolicy,
+	i cacheledger.OrphanIntent, pubs []cacheledger.OrphanPublication, old diskcache.ObjectStamp,
+	source *diskcache.CacheObject, now time.Time, budget *int64, withoutLocation func(func() error) error) string {
+	current, err := source.Stamp()
+	if err != nil {
+		return diskcache.ReclaimReason(err)
+	}
+	if !old.SameRenamed(current) {
+		return policy.hold(ctx, i, "restoration_changed")
+	}
+	if *budget < current.Size {
+		return "file_byte_limit"
+	}
+	*budget -= current.Size
+	if err := withoutLocation(func() error { return source.Verify(ctx, current, pubs[0].Digest) }); err != nil {
+		return diskcache.ReclaimReason(err)
+	}
+	// Check the name and parent again after reacquiring the location gate.
+	if err := source.Check(current); err != nil {
+		return policy.hold(ctx, i, "restoration_changed")
+	}
+	if err := policy.restored(ctx, i, pubs, stampJSON(current), now); err != nil {
+		return "ledger_error"
+	}
+	return "capacity_restored"
 }

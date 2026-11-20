@@ -223,10 +223,18 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 		go next.space.run(next.baseCtx)
 		if next.orphans != nil {
 			next.orphans.onUnlink = next.space.invalidateInventory
-			if next.space.tree != nil {
-				next.capacity = newCapacityManager(next.orphans, next.space)
-				go next.capacity.run(next.baseCtx)
+		}
+	}
+	if next.orphans != nil {
+		// Existing capacity obligations outlive the eviction configuration.
+		pending, pendingErr := next.ledger.CapacityIntents(next.baseCtx, 0)
+		if spaceConfig.Mode != "" || len(pending) != 0 || pendingErr != nil {
+			capacitySpace := next.space
+			if capacitySpace == nil {
+				capacitySpace = newSpaceManager(next.orphans.tree, spaceConfig)
 			}
+			next.capacity = newCapacityManager(next.orphans, capacitySpace)
+			go next.capacity.run(next.baseCtx)
 		}
 	}
 	if next.orphans != nil {
