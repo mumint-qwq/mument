@@ -17,6 +17,7 @@ import (
 	"github.com/gtsteffaniak/filebrowser/backend/internal/database/sqlitebusy"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/database/users"
 	libErrors "github.com/gtsteffaniak/filebrowser/backend/internal/errors"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/state"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
@@ -313,6 +314,7 @@ func serveDirectoryListing(ctx context.Context, req listingRequest, opts listing
 		}
 		return ErrToStatus(err), err
 	}
+	defer preview.TrackWarmupBrowse()()
 	indexPath = utils.AddTrailingSlashIfNotExists(indexPath)
 
 	liveInfo, err := files.FileInfoFaster(utils.FileOptions{
@@ -331,6 +333,7 @@ func serveDirectoryListing(ctx context.Context, req listingRequest, opts listing
 		return http.StatusBadRequest, newListingProtocolError(http.StatusBadRequest, "not_a_directory", "path is not a directory")
 	}
 
+	preview.NoteWarmupDirectory(req.source, liveInfo.RealPath)
 	db, err := ensureListingIndexReady(req.source, indexPath, liveInfo.ModTime)
 	if err != nil {
 		return listingStatus(err), err

@@ -19,6 +19,7 @@ import (
 	"github.com/gtsteffaniak/filebrowser/backend/internal/app"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/icons"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/previewwarmup"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/state"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/version"
@@ -152,11 +153,10 @@ func StartFilebrowser() {
 	validateAccessRules()
 	validateShareInfo()
 	// Start the rootCMD in a goroutine
+	var warmupDrainErr error
 	go func() {
-		if err := rootCMD(ctx, &serverConfig, runtimeApp, shutdownComplete); err != nil {
-			logger.Fatalf("Error starting filebrowser: %v", err)
-		}
-		close(done) // Signal that the server has stopped
+		warmupDrainErr = rootCMD(ctx, &serverConfig, runtimeApp, shutdownComplete)
+		close(done)
 	}()
 	// Wait for a shutdown signal or the server to stop
 	select {
@@ -168,9 +168,15 @@ func StartFilebrowser() {
 	}
 
 	httpResult := <-shutdownComplete
+	<-done // rootCMD has reported the bounded warmup drain result.
 	if !httpResult.Drained {
 		logger.Errorf("HTTP shutdown did not drain cleanly: %d handler(s) still active (error: %v)",
 			httpResult.ActiveHandlers, httpResult.HTTPError)
+	}
+
+	if warmupDrainErr != nil {
+		logger.Errorf("preview warmup did not drain: %v (leaving preview service, ledger, index database and caches open)", warmupDrainErr)
+		return
 	}
 
 	var stopErr error
@@ -201,15 +207,6 @@ func StartFilebrowser() {
 	// active handlers must leave it open.
 	busy := errors.Is(stopErr, files.ErrIndexMaintenanceBusy)
 	canCloseDependencies := httpResult.Drained && !busy
-	indexDB := indexing.GetIndexDB()
-	if indexDB != nil {
-		if canCloseDependencies {
-			indexDB.Close()
-		} else {
-			logger.Errorf("leaving the index database open (handlers_drained=%v maintenance_busy=%v)",
-				httpResult.Drained, busy)
-		}
-	}
 	// Preview tasks may still hold decode memory after HTTP handlers drained.
 	// Cancel queued work and wait for active generation to leave the budget
 	// before the cache directory can be cleared on shutdown.
@@ -223,8 +220,18 @@ func StartFilebrowser() {
 		}
 		cancelPreview()
 	}
+	canCloseDependencies = canCloseDependencies && previewStopped
+	indexDB := indexing.GetIndexDB()
+	if indexDB != nil {
+		if canCloseDependencies {
+			indexDB.Close()
+		} else {
+			logger.Errorf("leaving the index database open (handlers_drained=%v maintenance_busy=%v preview_stopped=%v)",
+				httpResult.Drained, busy, previewStopped)
+		}
+	}
 	if settings.Config.Server.CacheDirCleanup {
-		if canCloseDependencies && previewStopped {
+		if canCloseDependencies {
 			logger.Debugf("clearing cache dir: %s", settings.Config.Server.CacheDir)
 			fileutils.ClearCacheDir(settings.Config.Server.CacheDir)
 		} else {
@@ -276,10 +283,17 @@ func rootCMD(ctx context.Context, serverConfig *settings.Server, a *app.App, shu
 	// Initialize PWA manifest after icons are generated
 	icons.InitializePWAManifest()
 
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	defer cancelWorker()
+	warmup := previewwarmup.New(workerCtx, *serverConfig, indexing.GetIndexDB(), preview.GetService())
 	web.StartHttp(ctx, web.Deps{
-		Store: a.Store,
-		Files: a.Files,
-		Auth:  a.Auth,
+		Store:         a.Store,
+		Files:         a.Files,
+		Auth:          a.Auth,
+		PreviewWarmup: warmup,
 	}, shutdownComplete)
-	return nil
+	cancelWorker()
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelDrain()
+	return warmup.Wait(drainCtx)
 }

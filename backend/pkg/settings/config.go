@@ -71,6 +71,9 @@ func initializeConfig(configFile string, cliMode bool) {
 	setupHttp()
 	setupAuth(false)
 	setupSources(false)
+	if err := validatePreviewWarmup(Config.Server); err != nil {
+		logger.Fatal(err.Error())
+	}
 	InitializeUserResolvers() // Initialize user package resolvers after sources are set up
 	setupUrls()
 	if cliMode {

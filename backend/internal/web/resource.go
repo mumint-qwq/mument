@@ -158,6 +158,7 @@ func resourceGetHandler(w http.ResponseWriter, r *http.Request, d *Context) (int
 	if !filePerms.View {
 		return http.StatusForbidden, fmt.Errorf("user is not allowed to view files in this source")
 	}
+	defer preview.TrackWarmupBrowse()()
 	getContent := r.URL.Query().Get("content") == "true"
 	getMetadata := r.URL.Query().Get("metadata") == "true"
 	skipExtendedAttrs := r.URL.Query().Get("skipExtendedAttrs") == "true"
@@ -182,6 +183,7 @@ func resourceGetHandler(w http.ResponseWriter, r *http.Request, d *Context) (int
 		return http.StatusForbidden, fmt.Errorf("user is not allowed to get content, requires download permission")
 	}
 	if fileInfo.Type == "directory" {
+		preview.NoteWarmupDirectory(source, fileInfo.RealPath)
 		AttachViewTokensForDirectory(d, source, fileInfo)
 		markDirectorySpanCount(d, len(fileInfo.Files)+len(fileInfo.Folders))
 		return RenderJSON(w, r, fileInfo)

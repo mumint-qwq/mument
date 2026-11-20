@@ -40,7 +40,7 @@ type moveIndexEnv struct {
 	paths   map[string]string
 	indices map[string]*indexing.Index
 	user    *users.User
-	srv     *httptest.Server
+	srv     *moveHTTPServer
 	client  *http.Client
 }
 
@@ -141,11 +141,12 @@ func newMoveIndexEnv(t *testing.T, sourceNames ...string) *moveIndexEnv {
 			http.NotFound(w, r)
 		}
 	})
-	env.srv = httptest.NewServer(handler)
+	env.srv = newMoveHTTPServer(handler)
+	env.client.Transport = env.srv.client.Transport
 
 	t.Cleanup(func() {
 		env.waitIdle()
-		env.srv.Close()
+		env.srv.close()
 		indexing.SetRefreshProbeEnabled(false)
 		files.SetIndexWorkProbeEnabled(false)
 		indexing.ClearTestIndices()

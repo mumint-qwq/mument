@@ -41,7 +41,37 @@ func writeMoveImage(t *testing.T, path string, seed int64) {
 	require.NoError(t, os.WriteFile(path, data.Bytes(), 0o644))
 }
 
-func ledgerPreviewServer(t *testing.T, env *moveIndexEnv) *httptest.Server {
+// moveHTTPServer can exercise the same handlers through a recorder on hosts
+// that deny listening sockets. The default scale run still uses loopback.
+type moveHTTPServer struct {
+	URL    string
+	client *http.Client
+	close  func()
+}
+
+type moveHandlerTransport struct{ http.Handler }
+
+func (transport moveHandlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		defer req.Body.Close()
+	}
+	recorder := httptest.NewRecorder()
+	transport.ServeHTTP(recorder, req)
+	return recorder.Result(), nil
+}
+
+func newMoveHTTPServer(handler http.Handler) *moveHTTPServer {
+	if os.Getenv("MUMENT_MOVE_HANDLER_TRANSPORT") == "1" {
+		return &moveHTTPServer{
+			URL: "http://mument.test", client: &http.Client{Transport: moveHandlerTransport{handler}},
+			close: func() {},
+		}
+	}
+	server := httptest.NewServer(handler)
+	return &moveHTTPServer{URL: server.URL, client: server.Client(), close: server.Close}
+}
+
+func ledgerPreviewServer(t *testing.T, env *moveIndexEnv) *moveHTTPServer {
 	t.Helper()
 	if runtime.GOOS != "linux" || runtime.GOARCH == "386" || runtime.GOARCH == "arm" {
 		t.Skip("filesystem does not provide strong cache ledger observations")
@@ -52,20 +82,20 @@ func ledgerPreviewServer(t *testing.T, env *moveIndexEnv) *httptest.Server {
 		defer cancel()
 		require.NoError(t, preview.Shutdown(ctx))
 	})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newMoveHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status, err := previewHandler(w, r, &Context{User: env.user})
 		if err != nil {
 			http.Error(w, err.Error(), status)
 		}
 	}))
-	t.Cleanup(server.Close)
+	t.Cleanup(server.close)
 	return server
 }
 
-func readMovePreview(t *testing.T, env *moveIndexEnv, server *httptest.Server, path, size string) []byte {
+func readMovePreview(t *testing.T, env *moveIndexEnv, server *moveHTTPServer, path, size string) []byte {
 	t.Helper()
 	q := url.Values{"source": {"src"}, "path": {path}, "size": {size}}
-	response, err := env.client.Get(server.URL + "?" + q.Encode())
+	response, err := server.client.Get(server.URL + "?" + q.Encode())
 	require.NoError(t, err)
 	defer response.Body.Close()
 	data, err := io.ReadAll(response.Body)

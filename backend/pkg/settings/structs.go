@@ -88,6 +88,8 @@ type Server struct {
 	SourceMap    map[string]*Source `json:"-" validate:"omitempty"` // uses realpath as key
 	NameToSource map[string]*Source `json:"-" validate:"omitempty"` // uses name as key
 	DatabaseV2   Database           `json:"database"`               // SQLite database configuration
+
+	PreviewWarmup PreviewWarmupConfig `json:"previewWarmup,omitempty"`
 }
 
 type ActivityConfig struct {

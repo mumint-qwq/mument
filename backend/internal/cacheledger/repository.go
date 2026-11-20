@@ -151,6 +151,20 @@ func validPath(source, path string) bool {
 	return source != "" && filepath.IsAbs(path) && filepath.Clean(path) == path
 }
 
+// FindRef looks for an existing strong observation without allocating an asset.
+func (r *Repository) FindRef(ctx context.Context, source, path string, v Version) (Ref, error) {
+	if !v.Strong || !validPath(source, path) {
+		return Ref{}, nil
+	}
+	var asset string
+	err := r.db.QueryRowContext(ctx, "SELECT asset FROM refs WHERE source=? AND path=? AND version=?",
+		source, path, versionKey(v)).Scan(&asset)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Ref{}, nil
+	}
+	return Ref{source, path, asset, v}, err
+}
+
 // Resolve assigns a new random content generation on every version change.
 // A returned Ref is a publication token; all later writes compare that token.
 func (r *Repository) Resolve(ctx context.Context, source, path string, v Version) (Ref, error) {
