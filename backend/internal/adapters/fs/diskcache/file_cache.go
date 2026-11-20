@@ -218,8 +218,12 @@ func (f *FileCache) keyLock(key string) *sync.Mutex {
 }
 
 func (f *FileCache) getFileName(key string) string {
-	hasher := sha1.New()
-	_, _ = hasher.Write([]byte(key))
-	hash := hex.EncodeToString(hasher.Sum(nil))
-	return filepath.Join(f.dir, fmt.Sprintf("%s/%s/%s", hash[:1], hash[1:3], hash))
+	return filepath.Join(f.dir, RelativePath(key))
+}
+
+// RelativePath is the physical layout shared by cache I/O and read-only inventory.
+func RelativePath(key string) string {
+	sum := sha1.Sum([]byte(key))
+	hash := hex.EncodeToString(sum[:])
+	return filepath.Join(hash[:1], hash[1:3], hash)
 }

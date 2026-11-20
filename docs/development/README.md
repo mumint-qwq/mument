@@ -11,6 +11,7 @@ automated test success or permission to continue development is not acceptance.
   [implementation and build information](007c/IMPLEMENTATION.md), and
   [validation](007c/VALIDATION.md). The feature is awaiting maintainer review.
 - 007-D develops idle mosaic previews on `feature/007d-idle-preview-worker` from the accepted A/B/C tree. See the [design](007d/DESIGN.md) [operations and walkthrough](007d/OPERATIONS.md), and [validation](007d/VALIDATION.md).
+- 007-E1 adds a bounded read-only preview inventory on `feature/007e-cache-reclamation`. See the [design and walkthrough](007e/DESIGN.md) and [replay commands](007e/VALIDATION.md).
 - Preserve mument branding, upstream attribution, and build configuration without
   upstream analytics publishing when porting older Quantum patches.
 - Development, Git merging, pushing source, and deployment are separate actions.
