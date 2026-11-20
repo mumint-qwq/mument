@@ -21,6 +21,9 @@ func TestContentHashFullAndChanges(t *testing.T) {
 			defer f.Close()
 			v, err := Observe(path)
 			require.NoError(t, err)
+			if !v.Strong {
+				t.Skip("strong source observations unavailable")
+			}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			changed := false
@@ -133,4 +136,30 @@ func TestContentWorkRestartAndScopeIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, yes)
 	require.NoError(t, r.PruneContentWork(t.Context()))
+}
+
+func TestContentBindingWaitsForReclamation(t *testing.T) {
+	for _, table := range []string{"orphan_intents", "capacity_intents"} {
+		t.Run(table, func(t *testing.T) {
+			r := testRepository(t)
+			v := Version{Size: 100, MtimeNS: 1, CtimeNS: 2, Dev: 1, Ino: 3, Strong: true}
+			src, e := r.Resolve(t.Context(), "disk", "/source", v)
+			require.NoError(t, e)
+			_, e = r.Publish(t.Context(), src, "small", "key", []byte("data"))
+			require.NoError(t, e)
+			p := ContentProof{Asset: src.Asset, Bytes: 100, Digest: Digest([]byte("original"))}
+			require.NoError(t, r.ProveContent(t.Context(), src, p))
+			v.Ino++
+			target, e := r.Resolve(t.Context(), "disk", "/target", v)
+			require.NoError(t, e)
+			results, e := r.ContentResults(t.Context(), src.Asset)
+			require.NoError(t, e)
+			_, e = r.db.Exec("INSERT INTO " + table + "(id,storage_key,publications,expected,logical,blocks,state) VALUES('intent','key','pubs','stamp',4,512,'isolated')")
+			require.NoError(t, e)
+			require.ErrorIs(t, r.BindContent(t.Context(), target, p, results[0]), ErrStale)
+			_, e = r.db.Exec("UPDATE " + table + " SET state='removed'")
+			require.NoError(t, e)
+			require.NoError(t, r.BindContent(t.Context(), target, p, results[0]))
+		})
+	}
 }

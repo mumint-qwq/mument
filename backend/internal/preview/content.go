@@ -139,6 +139,13 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 	if err != nil {
 		return out, err
 	}
+	// Serialize the short binding window with D admission. Foreground requests
+	// remain free to start; their location planning and active count win below.
+	if !s.warmupRequest.CompareAndSwap(false, true) {
+		return out, ErrPreviewBusy
+	}
+	defer s.warmupRequest.Store(false)
+	remainingPreviewBytes := int64(32 << 20)
 	for _, candidate := range candidates {
 		results, err := s.ledger.ContentResults(ctx, candidate.Asset)
 		if err != nil {
@@ -151,7 +158,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 		var witness *cacheledger.ContentResult
 		for i := range results {
 			p := &results[i]
-			if p.Size <= 0 || p.Size > 32<<20 {
+			if p.Size <= 0 || p.Size > remainingPreviewBytes {
 				continue
 			}
 			// Isolated/held publications are protected; F never reads their paths.
@@ -163,6 +170,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 			if pending {
 				continue
 			}
+			remainingPreviewBytes -= p.Size
 			var data []byte
 			var found bool
 			if sized, ok := s.fileCache.(interface {
@@ -187,6 +195,12 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 			return out, e
 		}
 		e = check()
+		s.flights.mu.Lock()
+		busy := s.interactiveRequests.Load() != 0 || len(s.flights.calls) != 0
+		s.flights.mu.Unlock()
+		if busy {
+			e = ErrPreviewBusy
+		}
 		if e == nil {
 			e = s.ledger.BindContent(ctx, plan.ref, candidate, *witness)
 		}

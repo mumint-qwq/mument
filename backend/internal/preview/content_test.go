@@ -8,6 +8,9 @@ import (
 	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
 	"github.com/stretchr/testify/require"
+	"image"
+	"image/png"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -168,9 +171,10 @@ func TestContentReclamationDefersBindingAndSharedDeletion(t *testing.T) {
 	require.Equal(t, "reused", out.Reason)
 	// Independently confirmed source unlink leaves the copy protected. The last
 	// independently confirmed deletion starts E2's original grace, not before.
+	<-f.s.orphans.done
 	f.s.orphans.enabled = true
 	when := f.remove(t)
-	report := f.step(t, when.Add(2*orphanGrace), true)
+	report := f.step(t, when, true)
 	require.Zero(t, report.Unlinked)
 	require.FileExists(t, f.physical)
 	last := f.removePath(t, copy.RealPath)
@@ -178,4 +182,90 @@ func TestContentReclamationDefersBindingAndSharedDeletion(t *testing.T) {
 	require.Zero(t, early.Unlinked)
 	final := f.step(t, last.Add(orphanGrace+time.Second), true)
 	require.Equal(t, 1, final.Unlinked, "%+v", final)
+}
+
+func TestContentPNGAndVariantIsolation(t *testing.T) {
+	f := startOrphanFixture(t)
+	image := image.NewNRGBA(image.Rect(0, 0, 1300, 1200))
+	_, err := rand.New(rand.NewSource(17)).Read(image.Pix)
+	require.NoError(t, err)
+	path := filepath.Join(f.root, "image.png")
+	file, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, png.Encode(file, image))
+	require.NoError(t, file.Close())
+	source := iteminfo.ExtendedFileInfo{Source: "orphan-test", RealPath: path, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: "image.png", Type: "image/png", HasPreview: true}}}
+	previews := map[string][]byte{}
+	keys := map[string]bool{}
+	for _, size := range []string{"small", "large", "xlarge"} {
+		data, e := f.s.getPreviewForFile(t.Context(), source, size, "", 0)
+		require.NoError(t, e)
+		previews[size] = data
+		key := ledgerVariant(source, size)
+		require.False(t, keys[key])
+		keys[key] = true
+	}
+	out, err := reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	require.Equal(t, "proven_own", out.Reason)
+	target := source
+	target.Name = "copy.png"
+	target.RealPath = filepath.Join(f.root, target.Name)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(target.RealPath, data, 0600))
+	before := f.s.Stats().FullDecodes
+	out, err = reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "reused", out.Reason)
+	for size, expected := range previews {
+		data, e := f.s.getPreviewForFile(t.Context(), target, size, "", 0)
+		require.NoError(t, e)
+		require.Equal(t, expected, data)
+	}
+	require.Equal(t, before, f.s.Stats().FullDecodes)
+	jpeg := target
+	jpeg.Type = "image/jpeg"
+	jpeg.Name = "copy.jpg"
+	require.NotEqual(t, ledgerVariant(jpeg, "small"), ledgerVariant(target, "small"))
+	// C's variant includes quality (small/large/xlarge), output format, dimensions
+	// and fill/fit mode. F shares assets without aliasing these result keys.
+}
+
+func TestContentForegroundGenerationWinsDuringHash(t *testing.T) {
+	f := startOrphanFixture(t)
+	source := iteminfo.ExtendedFileInfo{Source: "orphan-test", RealPath: f.source, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: "source.jpg", Type: "image/jpeg", HasPreview: true}}}
+	_, err := reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	target := source
+	target.Name = "raced.jpg"
+	target.RealPath = filepath.Join(f.root, target.Name)
+	bytes, err := os.ReadFile(source.RealPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(target.RealPath, bytes, 0600))
+	entered, release := blockGeneration(f.s)
+	result := make(chan error, 1)
+	started := false
+	out, err := reuseTestFile(t, f.s, target, func(_ context.Context, n int) error {
+		if n > 0 && !started {
+			started = true
+			go func() { _, e := f.s.getPreviewForFile(t.Context(), target, "small", "", 0); result <- e }()
+			<-entered
+		}
+		return nil
+	})
+	require.ErrorIs(t, err, ErrPreviewBusy)
+	require.Positive(t, out.Bytes)
+	close(release)
+	require.NoError(t, <-result)
+	plan, err := f.s.planLedgerPreview(t.Context(), target, "small")
+	require.NoError(t, err)
+	require.NotEqual(t, f.ref.Asset, plan.ref.Asset)
+	_, hit, err := f.s.ledger.Lookup(t.Context(), plan.ref, plan.variant)
+	require.NoError(t, err)
+	require.True(t, hit)
+	out, err = reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "already_proven", out.Reason)
+	require.Zero(t, out.Bytes)
 }

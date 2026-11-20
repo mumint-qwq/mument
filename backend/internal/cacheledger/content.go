@@ -18,13 +18,13 @@ CREATE TABLE IF NOT EXISTS content_proofs (
  bytes INTEGER NOT NULL, digest TEXT NOT NULL, source TEXT NOT NULL,
  path TEXT NOT NULL, version TEXT NOT NULL, verified_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS content_match ON content_proofs(algorithm,bytes,digest,asset);
-CREATE TABLE IF NOT EXISTS content_ready (asset TEXT PRIMARY KEY REFERENCES content_proofs(asset), bytes INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS content_ready_size ON content_ready(bytes,asset);
+CREATE TABLE IF NOT EXISTS content_ready (asset TEXT PRIMARY KEY REFERENCES content_proofs(asset), algorithm TEXT NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS content_ready_size ON content_ready(algorithm,bytes,digest,asset);
 CREATE TRIGGER IF NOT EXISTS content_ready_proof AFTER INSERT ON content_proofs BEGIN
- INSERT OR IGNORE INTO content_ready SELECT NEW.asset,NEW.bytes WHERE EXISTS(SELECT 1 FROM results WHERE asset=NEW.asset);
+ INSERT OR IGNORE INTO content_ready SELECT NEW.asset,NEW.algorithm,NEW.bytes,NEW.digest WHERE EXISTS(SELECT 1 FROM results WHERE asset=NEW.asset);
 END;
 CREATE TRIGGER IF NOT EXISTS content_ready_result AFTER INSERT ON results BEGIN
- INSERT OR IGNORE INTO content_ready SELECT asset,bytes FROM content_proofs WHERE asset=NEW.asset;
+ INSERT OR IGNORE INTO content_ready SELECT asset,algorithm,bytes,digest FROM content_proofs WHERE asset=NEW.asset;
 END;
 CREATE TRIGGER IF NOT EXISTS content_ready_remove AFTER DELETE ON results BEGIN
  DELETE FROM content_ready WHERE asset=OLD.asset AND NOT EXISTS(SELECT 1 FROM results WHERE asset=OLD.asset);
@@ -78,7 +78,7 @@ func (r *Repository) ContentProof(ctx context.Context, ref Ref) (bool, error) {
 // Candidate size is only a cheap filter. Callers must compare the complete hash.
 func (r *Repository) ContentCandidates(ctx context.Context, size int64) ([]ContentProof, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT p.asset,p.digest,p.bytes FROM content_ready q INDEXED BY content_ready_size JOIN content_proofs p ON p.asset=q.asset
- WHERE p.algorithm=? AND q.bytes=? ORDER BY q.asset LIMIT 16`, ContentAlgorithm, size)
+ WHERE q.algorithm=? AND q.bytes=? ORDER BY q.digest,q.asset LIMIT 16`, ContentAlgorithm, size)
 	if err != nil {
 		return nil, err
 	}
@@ -261,8 +261,7 @@ func (r *Repository) PruneContentWork(ctx context.Context) error {
 }
 
 func (r *Repository) ContentMatches(ctx context.Context, p ContentProof) ([]ContentProof, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT asset,digest,bytes FROM content_proofs p WHERE algorithm=? AND bytes=? AND digest=?
- AND EXISTS(SELECT 1 FROM results WHERE asset=p.asset) ORDER BY asset LIMIT 16`, ContentAlgorithm, p.Bytes, p.Digest)
+	rows, err := r.db.QueryContext(ctx, `SELECT p.asset,p.digest,p.bytes FROM content_ready q INDEXED BY content_ready_size JOIN content_proofs p ON p.asset=q.asset WHERE q.algorithm=? AND q.bytes=? AND q.digest=? ORDER BY q.asset LIMIT 16`, ContentAlgorithm, p.Bytes, p.Digest)
 	if err != nil {
 		return nil, err
 	}

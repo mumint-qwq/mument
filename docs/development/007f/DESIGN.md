@@ -82,3 +82,28 @@ request waits for F or hashes originals on F's behalf.
 Validation and any deviations from this design are recorded separately. A fixed
 candidate is not a production authorization or a claim that unrun matrix entries
 passed.
+
+## Implemented refinements
+
+`content_ready` is a trigger-maintained auxiliary index over proofs that still
+have at least one result. Both cheap size screening and exact digest matching
+seek bounded pages; cold/deleted proofs cannot force a scan of history. E3 can
+continue to write its original result table while these additive triggers run.
+A target proof without a usable match is stored against its own exact token, so
+later candidate checks reuse the proof without repeating original I/O.
+
+Immediately around binding, F claims D's existing warmup admission flag. Inside
+the location gate it checks active foreground requests/flights, allowing a
+foreground generation with an empty target token to win. A new foreground path
+plan after this check waits on the location gate and resolves the shared token.
+No flight mutex is held across filesystem I/O or SQL. One binding attempt has a
+32 MiB total thumbnail-integrity budget across candidate variants. Original
+proof I/O precedes these gates. E's last-reference checks and F's insert remain
+serialized by the location gate and transaction.
+
+External retirement remains deliberately unimplemented: F never converts
+absence to an E2 deletion proof. Missing old refs are retained. All time-of-check
+rules rely on the strong filesystem version contract used by C/E (including
+nanosecond ctime and physical identity); stat-indistinguishable privileged edits
+are outside that contract. The mutation fixture crosses the filesystem's
+metadata timestamp update quantum before injecting an in-place edit.
