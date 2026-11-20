@@ -208,7 +208,9 @@ func (m *capacityManager) step(ctx context.Context, cursor *CapacityCursor, orph
 	if m.space.cfg.CapacityEviction && !m.paused.Load() {
 		report := m.report(ctx, *cursor, true)
 		*cursor = report.Next
-		m.last.Store(&report)
+		if report.Examined != 0 || len(report.Samples) != 0 || m.last.Load() == nil {
+			m.last.Store(&report)
+		}
 	}
 }
 
@@ -230,17 +232,27 @@ func (m *capacityManager) report(parent context.Context, cursor CapacityCursor, 
 		return r
 	}
 	now := m.space.now()
-	if apply && m.orphan.repo.AdvanceCapacityClock(ctx, now) != nil {
-		r.Reasons["clock_or_ledger"]++
-		r.Next = cursor
-		return r
-	}
 	var bytes int64 = orphanByteLimit
 	policy := m.policy(!apply)
 	intents, err := m.orphan.repo.CapacityIntents(ctx, cursor.Intent)
 	if err != nil {
 		r.Reasons["ledger_error"]++
 		return r
+	}
+	pressure := apply && m.space.needsCapacity()
+	if apply {
+		write := pressure
+		for _, intent := range intents {
+			if intent.State != "held" {
+				write = true
+				break
+			}
+		}
+		if write && m.orphan.repo.AdvanceCapacityClock(ctx, now) != nil {
+			r.Reasons["clock_or_ledger"]++
+			r.Next = cursor
+			return r
+		}
 	}
 	matched := make(map[string]bool)
 	for _, i := range intents {
@@ -254,7 +266,7 @@ func (m *capacityManager) report(parent context.Context, cursor CapacityCursor, 
 	if len(intents) == cacheledger.OrphanPageSize {
 		r.Next.Intent = cursor.Intent
 	}
-	if apply && !m.space.needsCapacity() {
+	if apply && (!pressure || !m.space.needsCapacity()) {
 		r.Reasons["space_recovered"]++
 		return r
 	}

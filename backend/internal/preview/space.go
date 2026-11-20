@@ -147,6 +147,9 @@ func (s *Service) WarmupSpace() error {
 	if m.status.State != "healthy" {
 		return &SpaceDeferred{m.status.Reason}
 	}
+	if age := m.now().Sub(m.status.FilesystemAt); age < 0 || age > 5*time.Second {
+		return &SpaceDeferred{"filesystem_stale"}
+	}
 	return nil
 }
 

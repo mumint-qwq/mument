@@ -239,6 +239,7 @@ func TestCapacityCooldownAcrossRestartMoveAndForeground(t *testing.T) {
 	require.Equal(t, cold.RealPath, ready[0].Path)
 
 	now = previous
+	m.space.poll(now)
 	repo := f.s.ledger
 	moved := filepath.Join(f.root, "moved.jpg")
 	namespace, name, ok := cacheledger.Location(f.root, moved)
@@ -276,4 +277,17 @@ func TestCapacityCooldownAcrossRestartMoveAndForeground(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, still.IsZero())
 	require.Equal(t, uint64(2), m.cooldownSkips.Load())
+}
+
+func TestCapacityHealthyLeavesClockAndOldPublicationsAlone(t *testing.T) {
+	f := startOrphanFixture(t)
+	plan, _ := publishCapacityFixture(t, f, "old.jpg")
+	now := time.Now().Add(8 * 24 * time.Hour)
+	m := testCapacity(t, f, now, true)
+	m.space.endInventory(now, m.space.revision, diskcache.Usage{}, nil)
+	r := m.report(t.Context(), CapacityCursor{}, true)
+	require.Zero(t, r.Unlinked)
+	require.Zero(t, r.Examined)
+	require.NoError(t, f.s.ledger.AdvanceCapacityClock(t.Context(), now.Add(-time.Second)))
+	require.FileExists(t, filepath.Join(f.cache, "diskcache", diskcache.RelativePath(plan.key)))
 }
