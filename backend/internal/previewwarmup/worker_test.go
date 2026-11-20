@@ -4,7 +4,9 @@ package previewwarmup
 
 import (
 	"context"
+	"crypto/md5"
 	"database/sql"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"math/rand"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/fileutils"
 	indexsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
@@ -360,4 +363,49 @@ func TestWarmupDrainWithBlockedStat(t *testing.T) {
 	// The caller can still use the shared dependencies while the stat is stuck.
 	require.NoError(t, w.db.DB().Ping())
 	require.NotNil(t, preview.MoveLedger())
+}
+
+func TestSpaceGatesManualAndAutomaticWorker(t *testing.T) {
+	db, idx, root := warmupTestIndex(t)
+	cache := t.TempDir()
+	previous := settings.Config.Server.PreviewSpace
+	t.Cleanup(func() { settings.Config.Server.PreviewSpace = previous })
+	settings.Config.Server.PreviewSpace = settings.PreviewSpaceConfig{
+		Mode: "enforce", BudgetMiB: 4, MinimumFreeMiB: 1, ResumeFreeMiB: 2, StableSeconds: 1,
+	}
+	thumbnail := iteminfo.ExtendedFileInfo{RealPath: filepath.Join(root, "known-legacy")}
+	identity := fmt.Sprintf("%s:%d:%s", thumbnail.RealPath, thumbnail.Size, thumbnail.ModTime.Format(time.RFC3339Nano))
+	key := preview.CacheKey(fmt.Sprintf("%x", md5.Sum([]byte(identity))), "small", 0)
+	filler := filepath.Join(cache, "diskcache", diskcache.RelativePath(key))
+	require.NoError(t, os.MkdirAll(filepath.Dir(filler), 0o700))
+	require.NoError(t, os.WriteFile(filler, make([]byte, 4<<20), 0o600))
+
+	require.NoError(t, preview.StartPreviewGeneratorWithBudget(1, 64, cache))
+	t.Cleanup(func() { require.NoError(t, preview.Shutdown(context.Background())) })
+	require.NoError(t, db.PreparePreviewWarmup(t.Context()))
+	pictures := filepath.Join(root, "Pictures")
+	makePhoto(t, filepath.Join(pictures, "a.jpg"), 1280, 1080)
+	require.NoError(t, idx.RefreshDirectory("/Pictures/", false))
+	w := &Worker{
+		db: db, svc: preview.GetService(), probe: fakePressure(t, cache),
+		scopes: []scope{{config: settings.PreviewWarmupScope{Source: "library", Directory: "Pictures"},
+			sourceRoot: root, root: pictures, prefix: "/Pictures/"}},
+		status: Status{Scopes: []ScopeStatus{{Scope: 1}}},
+	}
+	require.Eventually(t, func() bool {
+		status := preview.PreviewSpaceStatus()
+		return status.Complete && status.Reason == "high_usage"
+	}, 5*time.Second, 50*time.Millisecond)
+	require.Equal(t, "space_high_usage", w.step(t.Context(), 0, nil))
+	manual := &manualRun{}
+	require.Equal(t, "space_high_usage", w.step(t.Context(), 0, manual))
+	require.Empty(t, manual.cursor)
+	require.Zero(t, w.status.Retried)
+	require.Zero(t, w.svc.WarmupMetrics().FullDecodes)
+	preview.DelThumbs(t.Context(), thumbnail)
+	require.NoFileExists(t, filler)
+	require.Eventually(t, func() bool { return preview.GetService().WarmupSpace() == nil }, 5*time.Second, 50*time.Millisecond)
+	require.Equal(t, "generated", w.step(t.Context(), 0, manual))
+	require.Equal(t, "/Pictures/a.jpg", manual.cursor)
+	require.Equal(t, uint64(1), w.svc.WarmupMetrics().FullDecodes)
 }

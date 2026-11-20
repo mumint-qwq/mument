@@ -62,6 +62,9 @@ func (s *Service) WarmPreviewWhenIdle(ctx context.Context, file iteminfo.Extende
 		return ErrPreviewBusy
 	}
 	defer s.warmupRequest.Store(false)
+	if err := s.WarmupSpace(); err != nil {
+		return err
+	}
 	if s.ledger == nil {
 		return ErrWarmupStore
 	}
@@ -78,7 +81,15 @@ func (s *Service) WarmPreviewWhenIdle(ctx context.Context, file iteminfo.Extende
 		return ErrWarmupUnsupported
 	}
 
-	input := &warmupInput{open: open, stat: stat, check: check}
+	input := &warmupInput{open: open, stat: stat, check: func(estimate int64) error {
+		if err := s.WarmupSpace(); err != nil {
+			return err
+		}
+		if check != nil {
+			return check(estimate)
+		}
+		return nil
+	}}
 	plan, err := s.planLedgerPreviewWithStat(ctx, file, warmupSize, input, false)
 	if err != nil {
 		return err
@@ -117,13 +128,16 @@ func (s *Service) WarmPreviewWhenIdle(ctx context.Context, file iteminfo.Extende
 		}
 	}
 	result, err := s.flights.doWithAdmission(ctx, plan.key, true, func(taskCtx context.Context, markStarted func() bool) (previewResult, error) {
-		result, err := s.generateAndPublish(taskCtx, file, warmupSize, "", 0, plan.key, plan.key, markStarted, plan, input)
+		result, err := s.generateAndPublish(taskCtx, file, warmupSize, "", 0, plan.key, plan.key, markStarted, plan, input, true)
 		if err != nil {
 			return result, errors.Join(errWarmupFlight, err)
 		}
 		return result, nil
 	})
 	if err == nil && result.ready.Key == "" {
+		if result.spaceErr != nil {
+			return result.spaceErr
+		}
 		return ErrWarmupStore
 	}
 	return err
@@ -154,7 +168,7 @@ func (s *Service) checkWarmupCache(ctx context.Context, plan *ledgerPreview) err
 			return ErrWarmupCached
 		}
 	}
-	return nil
+	return s.warmupCooldown(ctx, plan)
 }
 
 func estimateWarmup(ctx context.Context, file iteminfo.ExtendedFileInfo, input *warmupInput) (previewEstimate, error) {

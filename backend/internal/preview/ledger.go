@@ -3,6 +3,7 @@ package preview
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 )
 
 type ledgerPreview struct {
+	source             string
 	path, key, variant string
 	version            cacheledger.Version
 	ref                cacheledger.Ref
@@ -167,7 +169,7 @@ func (s *Service) planLedgerPreviewWithStat(ctx context.Context, file iteminfo.E
 		return nil, ErrPreviewSourceChanged
 	}
 	v := cacheledger.FromFileInfo(info)
-	plan := &ledgerPreview{path: path, variant: variant, version: v}
+	plan := &ledgerPreview{source: file.Source, path: path, variant: variant, version: v}
 	uncached := func() (*ledgerPreview, error) {
 		// This identity lives only in the flight map. Weak stat fields can
 		// coalesce overlapping requests, but cannot address durable bytes.
@@ -274,6 +276,14 @@ func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledger
 		return previewResult{}, false, nil
 	}
 	if !found || !result.Matches(data) {
+		pending, pendingErr := s.ledger.PendingCapacityPublication(ctx, key)
+		if pendingErr != nil || pending {
+			return previewResult{}, false, nil
+		}
+		if s.space != nil && s.space.cfg.Mode == "enforce" &&
+			(s.space.tree == nil || s.space.tree.Check(false) != nil) {
+			return previewResult{}, false, nil
+		}
 		rejected, err := s.ledger.Reject(ctx, plan.ref, plan.variant, result)
 		if err != nil && ctx.Err() == nil {
 			logger.Warningf("cannot invalidate corrupt image preview: %v", err)
@@ -296,19 +306,26 @@ type previewSourceCheckError struct{ cause error }
 func (e *previewSourceCheckError) Error() string { return e.cause.Error() }
 func (e *previewSourceCheckError) Unwrap() error { return e.cause }
 
-func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool, warmup *warmupInput) (cacheledger.Result, error) {
+func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool, warmup *warmupInput, background bool) (cacheledger.Result, error) {
 	unlock, err := s.orphans.lockKey(ctx, key)
 	if err != nil {
 		return cacheledger.Result{}, err
 	}
 	defer unlock()
 	if plan == nil {
-		return cacheledger.Result{}, s.fileCache.Store(ctx, key, data)
+		return cacheledger.Result{}, s.storePreview(ctx, key, data, background)
 	}
 	if original || plan.ref.Asset == "" {
 		return cacheledger.Result{}, nil
 	}
-	if err := s.fileCache.Store(ctx, key, data); err != nil {
+	pending, err := s.ledger.PendingCapacityPublication(ctx, key)
+	if err != nil {
+		return cacheledger.Result{}, err
+	}
+	if pending {
+		return cacheledger.Result{}, &SpaceDeferred{"capacity_recovery"}
+	}
+	if err := s.storePreview(ctx, key, data, background); err != nil {
 		return cacheledger.Result{}, err
 	}
 	if warmup != nil {
@@ -325,7 +342,12 @@ func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *led
 			return cacheledger.Result{}, &previewSourceCheckError{cause: ErrPreviewSourceChanged}
 		}
 	}
-	return s.ledger.PublishObserved(ctx, plan.ref, plan.variant, key, data, s.orphans.publicationStamp(key))
+	stamp := s.orphans.publicationStamp(key)
+	var proof string
+	if s.capacity != nil && stamp != "" {
+		proof = plan.capacityProof()
+	}
+	return s.ledger.PublishScoped(ctx, plan.ref, plan.variant, key, data, stamp, proof)
 }
 
 func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, result previewResult, foreground bool) ([]byte, error) {
@@ -349,10 +371,25 @@ func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, resul
 			return nil, err
 		}
 	}
+	var deferred *SpaceDeferred
+	if foreground && errors.As(result.spaceErr, &deferred) && deferred.reason == "capacity_recovery" {
+		if err := s.recordCapacityDemand(ctx, plan); err != nil && s.capacity != nil {
+			s.capacity.rememberUsageFailure(plan.key, time.Now())
+		}
+	}
 	if foreground && result.ready.Key != "" {
-		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, result.ready, time.Now()); err != nil && ctx.Err() == nil {
+		now := time.Now()
+		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, result.ready, now); err != nil && ctx.Err() == nil {
+			if s.capacity != nil {
+				s.capacity.rememberUsageFailure(result.ready.Key, now)
+			}
 			logger.Warningf("cannot record image preview use: %v", err)
 		}
+	}
+	if foreground && result.spaceErr != nil && s.space != nil {
+		s.space.mu.Lock()
+		s.space.status.ForegroundUnstored++
+		s.space.mu.Unlock()
 	}
 	return result.data, nil
 }

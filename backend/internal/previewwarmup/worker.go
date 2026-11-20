@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	indexsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
@@ -35,13 +36,15 @@ var (
 )
 
 type scope struct {
-	config     settings.PreviewWarmupScope
-	sourceRoot string
-	root       string
-	prefix     string
-	cursor     string
-	pinned     scopeID
-	turn       uint64
+	config        settings.PreviewWarmupScope
+	sourceRoot    string
+	root          string
+	prefix        string
+	cursor        string
+	pinned        scopeID
+	turn          uint64
+	cooldownAfter cacheledger.CooldownCursor
+	nextCooldown  time.Time
 }
 
 func (s *scope) indexReady() bool {
@@ -269,6 +272,7 @@ const (
 	recentLane
 	directoryLane
 	manualLane
+	cooldownLane
 )
 
 func (w *Worker) selectPage(ctx context.Context, scope *scope, manual *manualRun) ([]indexsql.PreviewWarmupCandidate, lane, error) {
@@ -297,6 +301,11 @@ func (w *Worker) step(ctx context.Context, number int, manual *manualRun) string
 	if !w.svc.IdleForWarmup() {
 		return "foreground_busy"
 	}
+	if gate, ok := w.svc.(interface{ WarmupSpace() error }); ok {
+		if err := gate.WarmupSpace(); err != nil {
+			return err.Error()
+		}
+	}
 	if err := w.probe.poll(); err != nil {
 		return err.Error()
 	}
@@ -305,6 +314,11 @@ func (w *Worker) step(ctx context.Context, number int, manual *manualRun) string
 	if err != nil {
 		w.record(number, err.Error(), 0)
 		return err.Error()
+	}
+	if manual == nil {
+		if candidate, ok := w.selectCooldown(ctx, scope); ok {
+			return w.process(ctx, number, cooldownLane, scope, id, candidate)
+		}
 	}
 	page, selected, err := w.selectPage(ctx, scope, manual)
 	if err != nil {
@@ -342,6 +356,9 @@ func (w *Worker) step(ctx context.Context, number int, manual *manualRun) string
 				result, didWork = w.process(ctx, number, selected, scope, id, candidate), true
 			}
 		}
+		if strings.HasPrefix(result, "space_") {
+			return result
+		}
 		switch result {
 		case "foreground_busy", "scope_offline", "index_not_ready", "cancelled", "index_write_failed",
 			"cpu_throttled", "low_cache_space", "pressure_metrics_unavailable":
@@ -358,6 +375,39 @@ func (w *Worker) step(ctx context.Context, number int, manual *manualRun) string
 		}
 	}
 	return "idle"
+}
+
+func (w *Worker) selectCooldown(ctx context.Context, scope *scope) (indexsql.PreviewWarmupCandidate, bool) {
+	svc, ok := w.svc.(interface {
+		WarmupCooldownPage(context.Context, string, cacheledger.CooldownCursor) ([]preview.CooldownTarget, cacheledger.CooldownCursor, error)
+	})
+	now := time.Now()
+	if !ok || now.Before(scope.nextCooldown) {
+		return indexsql.PreviewWarmupCandidate{}, false
+	}
+	scope.nextCooldown = now.Add(5 * time.Second)
+	targets, next, err := svc.WarmupCooldownPage(ctx, scope.config.Source, scope.cooldownAfter)
+	if err != nil {
+		return indexsql.PreviewWarmupCandidate{}, false
+	}
+	scope.cooldownAfter = next
+	idx := indexing.GetIndex(scope.config.Source)
+	if idx == nil {
+		return indexsql.PreviewWarmupCandidate{}, false
+	}
+	for _, target := range targets {
+		path := idx.MakeIndexPath(target.Path, false).String()
+		if !strings.HasPrefix(path, scope.prefix) {
+			continue
+		}
+		c, err := w.db.PreviewWarmupExact(ctx, scope.config.Source, path)
+		if err == nil && c.RetryAt <= now.Unix() && c.MTimeNS <= now.Add(-quietFileAge).UnixNano() &&
+			indexing.MatchesPreviewWarmupVersion(target.Info, c.Version) {
+			scope.cooldownAfter = target.Cursor
+			return c, true
+		}
+	}
+	return indexsql.PreviewWarmupCandidate{}, false
 }
 
 func (w *Worker) process(ctx context.Context, number int, selected lane, scope *scope, id scopeID, c indexsql.PreviewWarmupCandidate) string {
@@ -417,6 +467,12 @@ func (w *Worker) process(ctx context.Context, number int, selected lane, scope *
 		return "index_not_ready"
 	case errors.Is(err, errCPUThrottled), errors.Is(err, errLowSpace), errors.Is(err, errPressureUnavailable):
 		return err.Error()
+	case errors.Is(err, preview.ErrWarmupCooldown), errors.Is(err, preview.ErrWarmupCapacityRecovery):
+		w.record(number, err.Error(), 0)
+		return err.Error()
+	case preview.IsSpaceDeferred(err):
+		w.record(number, err.Error(), 0)
+		return err.Error()
 	case errors.Is(err, errMemoryPressure):
 		outcome, attempts, retryAt = errMemoryPressure.Error(), c.Attempts, time.Now().Add(30*time.Second).Unix()
 	case errors.Is(err, preview.ErrWarmupUnsupported), errors.Is(err, preview.ErrPreviewOverBudget),
@@ -467,10 +523,13 @@ func (w *Worker) record(number int, reason string, discovered int) {
 		w.status.Retried++
 	case "terminal":
 		w.status.Terminal++
-	case "foreground_busy", "scope_offline", "index_not_ready", "memory_pressure":
+	case "foreground_busy", "scope_offline", "index_not_ready", "memory_pressure", "cooldown", "capacity_recovery":
 		w.status.Deferred++
 	default:
-		return
+		if !strings.HasPrefix(reason, "space_") {
+			return
+		}
+		w.status.Deferred++
 	}
 	w.status.Scopes[number].Checked++
 }

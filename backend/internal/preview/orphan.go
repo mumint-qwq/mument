@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,14 +24,17 @@ const orphanByteLimit = 64 << 20
 const orphanMaxFile = 32 << 20
 
 type orphanManager struct {
-	tree    *diskcache.ReclaimTree
-	repo    *cacheledger.Repository
-	enabled bool
-	grace   time.Duration
-	keys    [64]chan struct{}
-	done    chan struct{}
-	now     func() time.Time
-	last    atomic.Pointer[OrphanExecution]
+	tree     *diskcache.ReclaimTree
+	repo     *cacheledger.Repository
+	enabled  bool
+	grace    time.Duration
+	keys     [64]chan struct{}
+	done     chan struct{}
+	now      func() time.Time
+	last     atomic.Pointer[OrphanExecution]
+	window   sync.Mutex
+	cursor   OrphanCursor
+	onUnlink func()
 	// Tests inject a crash after a durable phase without cleanup.
 	checkpoint func(string) error
 }
@@ -51,14 +55,18 @@ func (o *orphanManager) lockKey(ctx context.Context, key string) (func(), error)
 	if o == nil {
 		return func() {}, nil
 	}
-	hash := sha256.Sum256([]byte(diskcache.RelativePath(key)))
-	gate := o.keys[int(hash[0])%len(o.keys)]
+	gate := o.keys[keyStripe(key)]
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case gate <- struct{}{}:
 		return func() { <-gate }, nil
 	}
+}
+
+func keyStripe(key string) int {
+	hash := sha256.Sum256([]byte(diskcache.RelativePath(key)))
+	return int(hash[0]) % 64
 }
 
 func (o *orphanManager) publicationStamp(key string) string {
@@ -89,19 +97,49 @@ func (o *orphanManager) run(ctx context.Context) {
 	}
 	timer := time.NewTicker(time.Minute)
 	defer timer.Stop()
-	var cursor OrphanCursor
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			r := o.report(ctx, cursor, true)
-			o.last.Store(&OrphanExecution{
-				At: o.now().UTC(), Unlinked: r.Unlinked, Logical: r.UnlinkedBytes, Blocks: r.UnlinkedBlocks,
-				Reasons: r.Reasons, Samples: r.Samples,
-			})
-			cursor = OrphanCursor{Candidate: r.NextCandidate, Intent: r.NextIntent, Object: r.NextObject}
+			o.executeWindow(ctx)
 		}
+	}
+}
+
+// executeWindow shares the applied cursor with pressure-triggered E2 work.
+func (o *orphanManager) executeWindow(ctx context.Context) bool {
+	if !o.enabled || !o.window.TryLock() {
+		return false
+	}
+	defer o.window.Unlock()
+	r := o.report(ctx, o.cursor, true)
+	o.last.Store(&OrphanExecution{
+		At: o.now().UTC(), Unlinked: r.Unlinked, Logical: r.UnlinkedBytes, Blocks: r.UnlinkedBlocks,
+		Reasons: r.Reasons, Samples: r.Samples,
+	})
+	o.cursor = OrphanCursor{Candidate: r.NextCandidate, Intent: r.NextIntent, Object: r.NextObject}
+	return true
+}
+
+type reclaimPolicy struct {
+	qualify  func(context.Context, string, []cacheledger.OrphanPublication, time.Time, *OrphanSample) string
+	intent   func(context.Context, string, string) (cacheledger.OrphanIntent, error)
+	reserve  func(context.Context, cacheledger.OrphanIntent) (cacheledger.OrphanIntent, error)
+	phase    func(context.Context, string, string, string) error
+	settle   func(context.Context, cacheledger.OrphanIntent, []cacheledger.OrphanPublication, string, int64, int64, time.Time) error
+	restore  func(string) bool
+	restored func(context.Context, cacheledger.OrphanIntent, []cacheledger.OrphanPublication, string, time.Time) error
+	eviction bool
+}
+
+func (o *orphanManager) orphanPolicy() reclaimPolicy {
+	return reclaimPolicy{
+		qualify: func(_ context.Context, _ string, pubs []cacheledger.OrphanPublication, now time.Time, sample *OrphanSample) string {
+			return qualifyOrphan(pubs, now, sample)
+		},
+		intent: o.repo.OrphanIntent, reserve: o.repo.ReserveOrphan, phase: o.repo.OrphanPhase, settle: o.repo.SettleOrphan,
+		restore: func(reason string) bool { return reason == "reference_present" },
 	}
 }
 
@@ -190,6 +228,7 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 			return r
 		}
 	}
+	policy := o.orphanPolicy()
 	var budget int64 = orphanByteLimit
 	visited := make(map[string]bool)
 	intents, err := o.repo.OrphanIntents(ctx, intentsAfter)
@@ -202,7 +241,7 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 			r.NextIntent = intentsAfter
 			break
 		}
-		if o.inspect(ctx, &r, intent.Key, intent, now, apply, &budget) {
+		if o.inspect(ctx, policy, &r, intent.Key, intent, now, apply, &budget) {
 			visited[intent.Key] = true
 		}
 		intentsAfter = intent.Row
@@ -244,7 +283,7 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 					break
 				}
 				if !visited[key] {
-					o.inspect(ctx, &r, key, cacheledger.OrphanIntent{}, now, apply, &budget)
+					o.inspect(ctx, policy, &r, key, cacheledger.OrphanIntent{}, now, apply, &budget)
 					visited[key] = true
 					remaining--
 				}
@@ -334,7 +373,7 @@ func qualifyOrphan(pubs []cacheledger.OrphanPublication, now time.Time, sample *
 	return ""
 }
 
-func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string, intent cacheledger.OrphanIntent, now time.Time, apply bool, budget *int64) (currentIntent bool) {
+func (o *orphanManager) inspect(ctx context.Context, policy reclaimPolicy, r *OrphanReport, key string, intent cacheledger.OrphanIntent, now time.Time, apply bool, budget *int64) (currentIntent bool) {
 	sample := OrphanSample{ID: cacheledger.Digest([]byte(key))}
 	defer func() { r.record(sample) }()
 	if !strings.HasPrefix(key, "c-raster/") {
@@ -353,6 +392,18 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 		return
 	}
 	defer func() { location() }()
+	withoutLocation := func(run func() error) error {
+		location()
+		location = func() {}
+		if err := run(); err != nil {
+			return err
+		}
+		again, err := o.repo.LockLocations(ctx)
+		if err == nil {
+			location = again
+		}
+		return err
+	}
 	pubs, err := o.repo.OrphanPublications(ctx, key)
 	if err != nil {
 		sample.Reason = "ledger_error"
@@ -360,20 +411,20 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 	}
 	set := cacheledger.OrphanPublicationSet(pubs)
 	if intent.ID == "" && set != "" {
-		intent, err = o.repo.OrphanIntent(ctx, key, set)
+		intent, err = policy.intent(ctx, key, set)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			sample.Reason = "ledger_error"
 			return
 		}
 	}
-	sample.Reason = qualifyOrphan(pubs, now, &sample)
+	sample.Reason = policy.qualify(ctx, key, pubs, now, &sample)
 	if intent.ID != "" {
 		currentIntent = set != "" && intent.Publications == set
 		if !apply {
 			sample.Reason = "intent_" + intent.State
 			return
 		}
-		sample.Reason = o.resume(ctx, r, sample.Reason, pubs, intent, set, now, budget, false)
+		sample.Reason = o.resume(ctx, policy, r, sample.Reason, pubs, intent, set, now, budget, false, withoutLocation)
 		return
 	}
 	if sample.Reason == "waiting_grace" {
@@ -400,25 +451,16 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 	*budget -= expected.Size
 	// The location gate need not cover this bounded payload read. The key
 	// gate protects the file while references and move intents can change.
-	location()
-	location = func() {}
-	err = object.Verify(ctx, expected, pubs[0].Digest)
-	if err != nil {
+	if err := withoutLocation(func() error { return object.Verify(ctx, expected, pubs[0].Digest) }); err != nil {
 		sample.Reason = diskcache.ReclaimReason(err)
 		return
 	}
-	reacquired, err := o.repo.LockLocations(ctx)
-	if err != nil {
-		sample.Reason = "interrupted"
-		return
-	}
-	location = reacquired
 	rechecked, err := o.repo.OrphanPublications(ctx, key)
 	if err != nil {
 		sample.Reason = "ledger_error"
 		return
 	}
-	if reason := qualifyOrphan(rechecked, now, &sample); reason != "" || cacheledger.OrphanPublicationSet(rechecked) != set {
+	if reason := policy.qualify(ctx, key, rechecked, now, &sample); reason != "" || cacheledger.OrphanPublicationSet(rechecked) != set {
 		sample.Reason = "eligibility_changed"
 		return
 	}
@@ -430,7 +472,7 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 	if !apply {
 		return
 	}
-	intent, err = o.repo.ReserveOrphan(ctx, cacheledger.OrphanIntent{
+	intent, err = policy.reserve(ctx, cacheledger.OrphanIntent{
 		Key: key, Publications: set, Expected: stampJSON(expected), Logical: expected.Size, Blocks: expected.Blocks,
 	})
 	if err != nil {
@@ -441,7 +483,7 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 		sample.Reason = "interrupted"
 		return
 	}
-	sample.Reason = o.resume(ctx, r, "", rechecked, intent, set, now, budget, true)
+	sample.Reason = o.resume(ctx, policy, r, "", rechecked, intent, set, now, budget, true, withoutLocation)
 	return
 }
 
@@ -449,8 +491,8 @@ func (o *orphanManager) interrupted(phase string) bool {
 	return o.checkpoint != nil && o.checkpoint(phase) != nil
 }
 
-func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect string, pubs []cacheledger.OrphanPublication,
-	i cacheledger.OrphanIntent, set string, now time.Time, budget *int64, verified bool) string {
+func (o *orphanManager) resume(ctx context.Context, policy reclaimPolicy, r *OrphanReport, protect string, pubs []cacheledger.OrphanPublication,
+	i cacheledger.OrphanIntent, set string, now time.Time, budget *int64, verified bool, withoutLocation func(func() error) error) string {
 	if i.State == "held" {
 		return "intent_held"
 	}
@@ -466,11 +508,16 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 	}
 	if set != i.Publications || len(pubs) == 0 {
 		if i.State == "reserved" && o.isolationAbsent(i.ID) {
-			return o.settle(ctx, i, nil, "superseded_reservation", 0, 0, now)
+			return policy.finish(ctx, i, nil, "superseded_reservation", 0, 0, now)
 		}
-		return o.hold(ctx, i, "publication_changed")
+		return policy.hold(ctx, i, "publication_changed")
 	}
-	if protect != "" && protect != "reference_present" {
+	restore := policy.restore(protect) || (policy.eviction && i.State == "restoring")
+	restoreReason := "reference_restored"
+	if policy.eviction {
+		restoreReason = "capacity_restored"
+	}
+	if protect != "" && !restore && !(policy.eviction && i.State == "removed") {
 		return protect
 	}
 	source, err := o.tree.OpenKey(i.Key)
@@ -479,8 +526,8 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 	}
 	defer source.Close()
 	isolated, err := o.tree.OpenIsolated(i.ID, i.State == "reserved" && protect == "")
-	if errors.Is(err, os.ErrNotExist) && protect == "reference_present" && i.State == "reserved" {
-		return o.settle(ctx, i, nil, "reference_restored", 0, 0, now)
+	if errors.Is(err, os.ErrNotExist) && restore && i.State == "reserved" {
+		return policy.finish(ctx, i, nil, restoreReason, 0, 0, now)
 	}
 	if err != nil {
 		return diskcache.ReclaimReason(err)
@@ -492,36 +539,45 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 	if err != nil && !absent {
 		return diskcache.ReclaimReason(err)
 	}
-	if i.State == "removed" || (i.State == "isolated" && absent) {
-		if !absent {
-			return o.hold(ctx, i, "isolation_changed")
+	if policy.eviction && absent && (i.State == "isolated" || i.State == "restoring") {
+		_, err := source.Stamp()
+		if err == nil {
+			return o.finishCapacityRestore(ctx, policy, i, pubs, old, source, now, budget, withoutLocation)
 		}
-		if protect == "reference_present" {
+		if !errors.Is(err, os.ErrNotExist) {
+			return diskcache.ReclaimReason(err)
+		}
+	}
+	if i.State == "removed" || ((i.State == "isolated" || i.State == "restoring") && absent) {
+		if !absent {
+			return policy.hold(ctx, i, "isolation_changed")
+		}
+		if restore && !policy.eviction {
 			reason := "reference_restored_after_remove"
 			if current, err := source.Stamp(); err == nil && old.SameRenamed(current) {
 				reason = "reference_restored"
 			}
-			return o.settle(ctx, i, nil, reason, 0, 0, now)
+			return policy.finish(ctx, i, nil, reason, 0, 0, now)
 		}
 		if i.State == "removed" {
-			return o.settle(ctx, i, pubs, "unlinked", i.Logical, i.Blocks, now)
+			return policy.finish(ctx, i, pubs, "unlinked", i.Logical, i.Blocks, now)
 		}
-		return o.settle(ctx, i, pubs, "missing_after_isolation", 0, 0, now)
+		return policy.finish(ctx, i, pubs, "missing_after_isolation", 0, 0, now)
 	}
 	if i.State == "reserved" && !absent {
-		return o.hold(ctx, i, "isolation_changed")
+		return policy.hold(ctx, i, "isolation_changed")
 	}
-	if absent && protect == "reference_present" {
+	if absent && restore {
 		if i.State == "moving" {
 			if current, err := source.Stamp(); err != nil || current != old {
-				return o.hold(ctx, i, "isolation_changed")
+				return policy.hold(ctx, i, "isolation_changed")
 			}
 		}
-		return o.settle(ctx, i, nil, "reference_restored", 0, 0, now)
+		return policy.finish(ctx, i, nil, restoreReason, 0, 0, now)
 	}
 	if absent {
 		if i.State == "reserved" {
-			if err := o.repo.OrphanPhase(ctx, i.ID, "moving", ""); err != nil {
+			if err := policy.phase(ctx, i.ID, "moving", ""); err != nil {
 				return "ledger_error"
 			}
 		}
@@ -540,37 +596,73 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 		}
 	}
 	if !old.SameRenamed(quarantined) {
-		return o.hold(ctx, i, "isolation_changed")
+		return policy.hold(ctx, i, "isolation_changed")
 	}
-	if i.State == "isolated" {
+	if i.State == "isolated" || i.State == "restoring" {
 		var recorded diskcache.ObjectStamp
 		if json.Unmarshal([]byte(i.Isolated), &recorded) != nil || recorded != quarantined {
-			return o.hold(ctx, i, "isolation_changed")
+			return policy.hold(ctx, i, "isolation_changed")
 		}
 	}
 	if !verified {
 		*budget -= quarantined.Size
-		if err := isolated.Verify(ctx, quarantined, pubs[0].Digest); err != nil {
+		if err := withoutLocation(func() error { return isolated.Verify(ctx, quarantined, pubs[0].Digest) }); err != nil {
 			return diskcache.ReclaimReason(err)
 		}
+		current, err := o.repo.OrphanPublications(ctx, i.Key)
+		if err != nil {
+			return "ledger_error"
+		}
+		if cacheledger.OrphanPublicationSet(current) != set {
+			return policy.hold(ctx, i, "publication_changed")
+		}
+		pubs = current
+		protect = policy.qualify(ctx, i.Key, pubs, now, new(OrphanSample))
+		restore = policy.restore(protect) || (policy.eviction && i.State == "restoring")
+		if protect != "" && !restore {
+			return protect
+		}
 	}
-	if protect == "reference_present" {
+	restoreObject := func() string {
+		if policy.eviction {
+			if err := policy.phase(ctx, i.ID, "restoring", stampJSON(quarantined)); err != nil {
+				return "ledger_error"
+			}
+			if o.interrupted("restoring") {
+				return "interrupted"
+			}
+		}
 		if err := isolated.Move(source, quarantined); err != nil {
 			return diskcache.ReclaimReason(err)
 		}
-		return o.settle(ctx, i, nil, "reference_restored", 0, 0, now)
+		if policy.eviction {
+			if o.interrupted("restored") {
+				return "interrupted"
+			}
+			return o.finishCapacityRestore(ctx, policy, i, pubs, old, source, now, budget, withoutLocation)
+		}
+		return policy.finish(ctx, i, nil, restoreReason, 0, 0, now)
 	}
-	if err := o.repo.OrphanPhase(ctx, i.ID, "isolated", stampJSON(quarantined)); err != nil {
+	if restore {
+		return restoreObject()
+	}
+	if err := policy.phase(ctx, i.ID, "isolated", stampJSON(quarantined)); err != nil {
 		return "ledger_error"
 	}
 	if o.interrupted("isolated") || ctx.Err() != nil {
 		return "interrupted"
 	}
-	if reason := qualifyOrphan(pubs, now, new(OrphanSample)); reason != "" {
+	if reason := policy.qualify(ctx, i.Key, pubs, now, new(OrphanSample)); reason != "" {
+		if policy.restore(reason) {
+			return restoreObject()
+		}
 		return reason
 	}
 	if err := isolated.Unlink(quarantined); err != nil {
 		return diskcache.ReclaimReason(err)
+	}
+	if o.onUnlink != nil {
+		o.onUnlink()
 	}
 	r.Unlinked++
 	r.UnlinkedBytes += quarantined.Size
@@ -578,10 +670,10 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 	if o.interrupted("unlinked") {
 		return "interrupted"
 	}
-	if err := o.repo.OrphanPhase(ctx, i.ID, "removed", ""); err != nil {
+	if err := policy.phase(ctx, i.ID, "removed", ""); err != nil {
 		return "ledger_error"
 	}
-	return o.settle(ctx, i, pubs, "unlinked", quarantined.Size, quarantined.Blocks, now)
+	return policy.finish(ctx, i, pubs, "unlinked", quarantined.Size, quarantined.Blocks, now)
 }
 
 func (o *orphanManager) isolationAbsent(id string) bool {
@@ -594,17 +686,46 @@ func (o *orphanManager) isolationAbsent(id string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func (o *orphanManager) hold(ctx context.Context, i cacheledger.OrphanIntent, reason string) string {
-	if err := o.repo.OrphanPhase(ctx, i.ID, "held", i.Isolated); err != nil {
+func (policy reclaimPolicy) hold(ctx context.Context, i cacheledger.OrphanIntent, reason string) string {
+	if err := policy.phase(ctx, i.ID, "held", i.Isolated); err != nil {
 		return "ledger_error"
 	}
 	return reason
 }
 
-func (o *orphanManager) settle(ctx context.Context, i cacheledger.OrphanIntent, pubs []cacheledger.OrphanPublication,
+func (policy reclaimPolicy) finish(ctx context.Context, i cacheledger.OrphanIntent, pubs []cacheledger.OrphanPublication,
 	reason string, logical, blocks int64, now time.Time) string {
-	if err := o.repo.SettleOrphan(ctx, i, pubs, reason, logical, blocks, now); err != nil {
+	if err := policy.settle(ctx, i, pubs, reason, logical, blocks, now); err != nil {
 		return "ledger_error"
 	}
 	return reason
+}
+
+// Both live rename and crash recovery establish the same proof before updating
+// the old epoch. Payload verification releases the C location gate.
+func (o *orphanManager) finishCapacityRestore(ctx context.Context, policy reclaimPolicy,
+	i cacheledger.OrphanIntent, pubs []cacheledger.OrphanPublication, old diskcache.ObjectStamp,
+	source *diskcache.CacheObject, now time.Time, budget *int64, withoutLocation func(func() error) error) string {
+	current, err := source.Stamp()
+	if err != nil {
+		return diskcache.ReclaimReason(err)
+	}
+	if !old.SameRenamed(current) {
+		return policy.hold(ctx, i, "restoration_changed")
+	}
+	if *budget < current.Size {
+		return "file_byte_limit"
+	}
+	*budget -= current.Size
+	if err := withoutLocation(func() error { return source.Verify(ctx, current, pubs[0].Digest) }); err != nil {
+		return diskcache.ReclaimReason(err)
+	}
+	// Check the name and parent again after reacquiring the location gate.
+	if err := source.Check(current); err != nil {
+		return policy.hold(ctx, i, "restoration_changed")
+	}
+	if err := policy.restored(ctx, i, pubs, stampJSON(current), now); err != nil {
+		return "ledger_error"
+	}
+	return "capacity_restored"
 }

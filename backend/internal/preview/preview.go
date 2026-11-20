@@ -48,6 +48,8 @@ type Service struct {
 	fileCache      diskcache.Interface
 	ledger         *cacheledger.Repository
 	orphans        *orphanManager
+	space          *spaceManager
+	capacity       *capacityManager
 	recoveryDone   chan struct{}
 	ledgerClose    sync.Once
 	ledgerCloseErr error
@@ -93,6 +95,10 @@ func NewPreviewGenerator(concurrencyLimit int, cacheDir string) *Service {
 // budget is shared by every preview task. There is no second independent
 // four-task or eight-megabyte semaphore.
 func NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cacheDir string) *Service {
+	return newPreviewGenerator(concurrencyLimit, memoryBudgetMB, cacheDir, false)
+}
+
+func newPreviewGenerator(concurrencyLimit, memoryBudgetMB int, cacheDir string, spaceConfigured bool) *Service {
 	configureImagingParallelism()
 
 	if concurrencyLimit < 1 {
@@ -107,10 +113,11 @@ func NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cacheDi
 		actualCacheDir = os.TempDir()
 	}
 
-	var fileCache diskcache.Interface
-	// Use file cache if cacheDir is specified
-	var err error
-	fileCache, err = diskcache.NewFileCache(actualCacheDir)
+	openCache := diskcache.NewFileCache
+	if spaceConfigured {
+		openCache = diskcache.NewRetainedFileCache
+	}
+	fileCache, err := openCache(actualCacheDir)
 	if err != nil {
 		logger.Error("The cache dir could not be created. Make sure the user that you executed the program with has access to create directories in the local path. See  ")
 		logger.Fatalf("failed to create file cache path, which is now require to run the server: %v", err)
@@ -194,17 +201,44 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 			return err
 		}
 	}
-	next := NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB, cacheDir)
+	spaceConfig := settings.Config.Server.PreviewSpace
+	next := newPreviewGenerator(concurrencyLimit, memoryBudgetMB, cacheDir, spaceConfig.Mode != "")
 	next.startLedger()
 	if tree != nil && next.ledger != nil {
 		next.orphans = newOrphanManager(tree, next.ledger, enabled, settings.Config.Server.PreviewOrphanGraceHours)
-		go next.orphans.run(next.baseCtx)
 	} else if tree != nil {
 		_ = tree.Close()
 	}
 	if enabled && next.orphans == nil {
 		_ = next.Shutdown(context.Background())
 		return ErrPreviewUnavailable
+	}
+	if spaceConfig.Mode != "" {
+		var spaceTree *diskcache.ReclaimTree
+		if next.orphans != nil {
+			spaceTree = next.orphans.tree
+		}
+		next.space = newSpaceManager(spaceTree, spaceConfig)
+		next.space.bind(next.ledger)
+		go next.space.run(next.baseCtx)
+		if next.orphans != nil {
+			next.orphans.onUnlink = next.space.invalidateInventory
+		}
+	}
+	if next.orphans != nil {
+		// Existing capacity obligations outlive the eviction configuration.
+		pending, pendingErr := next.ledger.CapacityIntents(next.baseCtx, 0)
+		if spaceConfig.Mode != "" || len(pending) != 0 || pendingErr != nil {
+			capacitySpace := next.space
+			if capacitySpace == nil {
+				capacitySpace = newSpaceManager(next.orphans.tree, spaceConfig)
+			}
+			next.capacity = newCapacityManager(next.orphans, capacitySpace)
+			go next.capacity.run(next.baseCtx)
+		}
+	}
+	if next.orphans != nil {
+		go next.orphans.run(next.baseCtx)
 	}
 	service = next
 	return nil
@@ -240,6 +274,20 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if s.recoveryDone != nil {
 		select {
 		case <-s.recoveryDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if s.capacity != nil {
+		select {
+		case <-s.capacity.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if s.space != nil {
+		select {
+		case <-s.space.done:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -293,6 +341,7 @@ func WarmPreviewForFile(ctx context.Context, file iteminfo.ExtendedFileInfo, pre
 }
 
 type previewResult struct {
+	spaceErr error
 	data     []byte
 	ready    cacheledger.Result
 	weakInfo os.FileInfo
@@ -335,6 +384,14 @@ func (s *Service) requestInteractivePreview(ctx context.Context, file iteminfo.E
 		cacheKey = publication.key
 	}
 
+	if foreground {
+		release, err := s.capacity.claim(ctx, cacheKey)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+
 	if result, found, err := s.loadPreviewCache(ctx, cacheKey, publication); err != nil {
 		return nil, fmt.Errorf("failed to load from cache: %w", err)
 	} else if found {
@@ -352,7 +409,7 @@ func (s *Service) requestInteractivePreview(ctx context.Context, file iteminfo.E
 			s.stats.cacheHits.Add(1)
 			return result, nil
 		}
-		return s.generateAndPublish(taskCtx, file, previewSize, url, seekPercentage, cacheHash, cacheKey, markStarted, publication, nil)
+		return s.generateAndPublish(taskCtx, file, previewSize, url, seekPercentage, cacheHash, cacheKey, markStarted, publication, nil, !foreground)
 	})
 	if err != nil {
 		return nil, err
@@ -372,7 +429,7 @@ func (s *Service) loadCached(ctx context.Context, cacheKey string) ([]byte, bool
 		// Older builds stored an empty marker after a failed generation. That
 		// turned a transient failure into a permanent one; delete it and let the
 		// request retry under normal admission.
-		_ = s.fileCache.Delete(ctx, cacheKey)
+		_ = s.deletePreviewCache(ctx, cacheKey)
 		s.stats.cacheCorrupt.Add(1)
 		return nil, false, nil
 	}
@@ -382,7 +439,7 @@ func (s *Service) loadCached(ctx context.Context, cacheKey string) ([]byte, bool
 // generateAndPublish is the only path that opens the source for preview work.
 // It reserves memory, verifies the source version, generates, verifies again,
 // and atomically publishes the result.
-func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int, fileMD5, cacheKey string, markStarted func() bool, publication *ledgerPreview, warmup *warmupInput) (previewResult, error) {
+func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int, fileMD5, cacheKey string, markStarted func() bool, publication *ledgerPreview, warmup *warmupInput, background bool) (previewResult, error) {
 	if fileMD5 == "" {
 		return previewResult{}, fmt.Errorf("preview cache hash is empty")
 	}
@@ -550,7 +607,7 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	}
 
 	publishStart := time.Now()
-	ready, err := s.publishPreviewCache(ctx, cacheKey, publication, data, original, warmup)
+	ready, err := s.publishPreviewCache(ctx, cacheKey, publication, data, original, warmup, background)
 	var sourceCheck *previewSourceCheckError
 	if errors.As(err, &sourceCheck) {
 		if errors.Is(sourceCheck, ErrPreviewSourceChanged) {
@@ -571,6 +628,9 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	s.stats.publishNanos.Add(uint64(time.Since(publishStart).Nanoseconds()))
 	s.stats.generateNanos.Add(uint64(time.Since(start).Nanoseconds()))
 	result := previewResult{data: data, ready: ready}
+	if IsSpaceDeferred(err) {
+		result.spaceErr = err
+	}
 	if publication != nil && publication.weakInfo != nil {
 		result.weakInfo = after
 	}
@@ -1000,7 +1060,7 @@ func GeneratePreviewWithMD5(ctx context.Context, file iteminfo.ExtendedFileInfo,
 		return nil, ErrPreviewSaturated
 	}
 	defer service.tasks.release()
-	result, err := service.generateAndPublish(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, CacheKey(fileMD5, previewSize, seekPercentage), nil, nil, nil)
+	result, err := service.generateAndPublish(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, CacheKey(fileMD5, previewSize, seekPercentage), nil, nil, nil, false)
 	return result.data, err
 }
 
@@ -1106,7 +1166,7 @@ func DelThumbs(ctx context.Context, file iteminfo.ExtendedFileInfo) {
 	if err != nil {
 		return
 	}
-	errSmall := service.fileCache.Delete(ctx, small)
+	errSmall := service.deletePreviewCache(ctx, small)
 	unlock()
 	if errSmall != nil {
 		large := CacheKey(cacheHash, "large", 0)
@@ -1114,7 +1174,7 @@ func DelThumbs(ctx context.Context, file iteminfo.ExtendedFileInfo) {
 		if err != nil {
 			return
 		}
-		errLarge := service.fileCache.Delete(ctx, large)
+		errLarge := service.deletePreviewCache(ctx, large)
 		unlock()
 		if errLarge != nil {
 			logger.Debugf("Could not delete thumbnail: %v", file.Name)

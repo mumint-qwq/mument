@@ -18,6 +18,7 @@ func (*ReclaimTree) Check(bool) error                                  { return 
 func (*ReclaimTree) OpenKey(string) (*CacheObject, error)              { return nil, ErrReclaimScope }
 func (*ReclaimTree) OpenIsolated(string, bool) (*CacheObject, error)   { return nil, ErrReclaimScope }
 func (*CacheObject) Close() error                                      { return nil }
+func (*CacheObject) Check(ObjectStamp) error                           { return ErrReclaimScope }
 func (*CacheObject) Stamp() (ObjectStamp, error)                       { return ObjectStamp{}, ErrReclaimScope }
 func (*CacheObject) Verify(context.Context, ObjectStamp, string) error { return ErrReclaimScope }
 func (*CacheObject) Move(*CacheObject, ObjectStamp) error              { return ErrReclaimScope }

@@ -1,0 +1,29 @@
+# 007-E3 配置与复验
+
+以下为合成复验示例。容量淘汰默认关闭，observe 只观测及试算，enforce 开启水位和写入准入。真实容量和值需用目标专用分区验收。
+
+```yaml
+server:
+  cacheDir: /var/tmp/synthetic-preview-cache
+  cacheDirCleanup: false
+  previewSpace:
+    mode: observe
+    budgetMiB: 64
+    minimumFreeMiB: 512
+    resumeFreeMiB: 768
+    stableSeconds: 60
+    capacityEviction: false
+```
+
+管理员查询 /api/settings/preview-space 核对配置、覆盖、根、空间、在途写入和三个开关。/api/settings/preview-capacity 提供候选与持久审计试算，分页使用 time、row、used、intent 和 audit。要试用准入，在合成环境将 mode 设为 enforce 并受控重启。要独立验证物理淘汰，同时设 capacityEviction 为 true，可保留 D 关闭并分别验证 E2 开关。
+
+```bash
+scripts/development/verify-007e3.sh /tmp/007e3-native
+scripts/development/verify-007e3.sh /tmp/007e3-docker --container
+```
+
+宿主机脚本保存固定源提交、二进制 SHA-256、测试日志和退出码。覆盖合成高低水位、并发预留、保护筛选、后台手工暂停恢复、强制退出、独立私有挂载、真实 ENOSPC 和 inode 以及向 E2 和 D 回退后再回到 E3。复用 E2 的完整复跑，包含 E1、应用入口、千图移动及 D 守护。Docker 回放用无网络和只读镜像根，运行时核对 2 CPU、1 GiB 内存及 1 GiB swap，记录容器退出与 OOM 状态。两个独立容器复用临时卷，要求唯一挂载 ID 改变，再按同一 E3 意图恢复。
+
+独立评审后的回归纳入同一脚本。私有 8 MiB tmpfs 以 4 MiB 最低余量验证先前采样无法批准越界写入，另以 38 个 inode 验证写入后重新采样。归还覆盖 restoring、物理归还后 SQL 前的强制进程退出及旧 isolated 记录的恢复，再次压力验证同一 epoch 的新物理戳。前台先访问覆盖预算拒绝与充足空间两种情形，并在恢复前重启，验证发布 epoch 和实际使用记录。负例包括相同字节的新 inode、原 inode 篡改后还原 mtime、新发布、目录替换及已 unlink。模式切换从 enforce 淘汰并登记冷却，再由真实启动入口进入 observe，验证 D 可以解码和落盘。
+
+第二轮复审回归纳入 TestCapacityRereview。真实 restored 检查点替换目标文件后，旧发布戳保留，意图进入 held，后续压力保留替换文件。真实进程隔离退出后分别由三种停用配置启动，后台在有界窗口归还原对象，两次请求均命中原字节和 epoch，同时保留额外的已到期冷候选。错盘和伪隔离对象在三种模式下保留，真实只读 tmpfs 保护通过私有命名空间执行。容量关闭时已启用 E2 的压力优先机会另有回归。

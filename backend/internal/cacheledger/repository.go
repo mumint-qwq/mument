@@ -90,10 +90,13 @@ func Open(path string) (*Repository, error) {
 	if err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	if _, err = tx.Exec(schema + orphanSchema); err != nil {
+	if _, err = tx.Exec(schema + orphanSchema + capacitySchema + capacityCooldownSchema); err != nil {
 		return nil, errors.Join(err, tx.Rollback(), db.Close())
 	}
 	if err = initOrphanIntents(tx); err != nil {
+		return nil, errors.Join(err, tx.Rollback(), db.Close())
+	}
+	if err = initCapacityIntents(tx); err != nil {
 		return nil, errors.Join(err, tx.Rollback(), db.Close())
 	}
 	var count, version int
@@ -226,6 +229,10 @@ func (r *Repository) Publish(ctx context.Context, ref Ref, variant, key string, 
 
 // PublishObserved binds a coordinated physical cache write to a new epoch.
 func (r *Repository) PublishObserved(ctx context.Context, ref Ref, variant, key string, data []byte, stamp string) (Result, error) {
+	return r.PublishScoped(ctx, ref, variant, key, data, stamp, "")
+}
+
+func (r *Repository) PublishScoped(ctx context.Context, ref Ref, variant, key string, data []byte, stamp, proof string) (Result, error) {
 	if variant == "" || key == "" || len(data) == 0 {
 		return Result{}, fmt.Errorf("invalid ledger publication")
 	}
@@ -247,10 +254,21 @@ func (r *Repository) PublishObserved(ctx context.Context, ref Ref, variant, key 
 		return Result{}, err
 	}
 	if stamp != "" {
-		_, err := tx.ExecContext(ctx, "INSERT INTO orphan_publications VALUES(?,?,?,?,?)",
-			ref.Asset, variant, newID(), published.GeneratedAt, stamp)
-		if err != nil {
+		epoch := newID()
+		if _, err := tx.ExecContext(ctx, "INSERT INTO orphan_publications VALUES(?,?,?,?,?)", ref.Asset, variant, epoch, published.GeneratedAt, stamp); err != nil {
 			return Result{}, err
+		}
+		// A committed replacement under the physical key gate ends the
+		// cooldown for this exact asset and variant, even with no source proof.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM capacity_cooldown WHERE asset=? AND variant=?", ref.Asset, variant); err != nil {
+			return Result{}, err
+		}
+		if proof != "" {
+			_, err := tx.ExecContext(ctx, `INSERT INTO capacity_entries(asset,variant,epoch,storage_key,generated,used,proof)
+ VALUES(?,?,?,?,?,?,?)`, ref.Asset, variant, epoch, key, published.GeneratedAt, published.LastUsedAt, proof)
+			if err != nil {
+				return Result{}, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

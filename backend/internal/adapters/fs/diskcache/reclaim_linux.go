@@ -267,6 +267,24 @@ func (o *CacheObject) current() error {
 	return nil
 }
 
+// Check validates the root, parent directory and the current leaf identity.
+func (o *CacheObject) Check(expected ObjectStamp) error {
+	if err := o.tree.CheckRecordedRoot(expected.Root); err != nil {
+		return err
+	}
+	if err := o.current(); err != nil {
+		return err
+	}
+	current, err := o.Stamp()
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return ErrReclaimIdentity
+	}
+	return nil
+}
+
 func (o *CacheObject) Verify(ctx context.Context, before ObjectStamp, digest string) error {
 	if err := o.tree.CheckRecordedRoot(before.Root); err != nil {
 		return err
@@ -311,7 +329,7 @@ func (o *CacheObject) Verify(ctx context.Context, before ObjectStamp, digest str
 	if now != before || hex.EncodeToString(sum.Sum(nil)) != digest {
 		return ErrReclaimIdentity
 	}
-	return nil
+	return o.Check(before)
 }
 
 func (o *CacheObject) Move(to *CacheObject, expected ObjectStamp) error {
