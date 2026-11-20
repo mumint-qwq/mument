@@ -17,6 +17,7 @@ import (
 )
 
 type ledgerPreview struct {
+	source             string
 	path, key, variant string
 	version            cacheledger.Version
 	ref                cacheledger.Ref
@@ -167,7 +168,7 @@ func (s *Service) planLedgerPreviewWithStat(ctx context.Context, file iteminfo.E
 		return nil, ErrPreviewSourceChanged
 	}
 	v := cacheledger.FromFileInfo(info)
-	plan := &ledgerPreview{path: path, variant: variant, version: v}
+	plan := &ledgerPreview{source: file.Source, path: path, variant: variant, version: v}
 	uncached := func() (*ledgerPreview, error) {
 		// This identity lives only in the flight map. Weak stat fields can
 		// coalesce overlapping requests, but cannot address durable bytes.
@@ -325,7 +326,12 @@ func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *led
 			return cacheledger.Result{}, &previewSourceCheckError{cause: ErrPreviewSourceChanged}
 		}
 	}
-	return s.ledger.PublishObserved(ctx, plan.ref, plan.variant, key, data, s.orphans.publicationStamp(key))
+	stamp := s.orphans.publicationStamp(key)
+	var proof string
+	if s.capacity != nil && stamp != "" {
+		proof = plan.capacityProof()
+	}
+	return s.ledger.PublishScoped(ctx, plan.ref, plan.variant, key, data, stamp, proof)
 }
 
 func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, result previewResult, foreground bool) ([]byte, error) {
@@ -350,7 +356,11 @@ func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, resul
 		}
 	}
 	if foreground && result.ready.Key != "" {
-		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, result.ready, time.Now()); err != nil && ctx.Err() == nil {
+		now := time.Now()
+		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, result.ready, now); err != nil && ctx.Err() == nil {
+			if s.capacity != nil {
+				s.capacity.rememberUsageFailure(result.ready.Key, now)
+			}
 			logger.Warningf("cannot record image preview use: %v", err)
 		}
 	}

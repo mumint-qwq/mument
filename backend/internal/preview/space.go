@@ -50,6 +50,10 @@ type SpaceStatus struct {
 	DEnabled           bool                  `json:"warmup_enabled"`
 	E2Enabled          bool                  `json:"orphan_reclamation_enabled"`
 	E3Enabled          bool                  `json:"capacity_eviction_enabled"`
+	CapacityPaused     bool                  `json:"capacity_paused"`
+	LastCapacity       *CapacityReport       `json:"last_capacity,omitempty"`
+	OrphanFirst        string                `json:"orphan_first,omitempty"`
+	LastOrphan         *OrphanExecution      `json:"last_orphan,omitempty"`
 }
 
 type spaceManager struct {
@@ -61,6 +65,7 @@ type spaceManager struct {
 	mu               sync.Mutex
 	status           SpaceStatus
 	revision         uint64
+	pressureCause    string
 	fsReason         string
 	writeError       string
 	observersWriting int
@@ -87,6 +92,16 @@ func PreviewSpaceStatus() SpaceStatus {
 	result := SpaceStatus{Mode: "off", State: "disabled", Reason: "disabled"}
 	if s := service; s != nil && s.space != nil {
 		result = s.space.snapshot()
+		if s.capacity != nil {
+			result.CapacityPaused = s.capacity.paused.Load()
+			result.LastCapacity = s.capacity.last.Load()
+			if priority := s.capacity.priority.Load(); priority != nil {
+				result.OrphanFirst = *priority
+			}
+		}
+		if s.orphans != nil {
+			result.LastOrphan = s.orphans.last.Load()
+		}
 	}
 	result.DEnabled = settings.Config.Server.PreviewWarmup.Enabled
 	result.E2Enabled = settings.Config.Server.PreviewOrphanReclamation
@@ -162,6 +177,10 @@ func (m *spaceManager) evaluate(now time.Time) {
 		reason = "high_usage"
 	}
 	if reason != "" {
+		switch reason {
+		case "high_usage", "low_free", "low_inodes":
+			m.pressureCause = reason
+		}
 		s.State, s.Reason, s.RecoveringSince = "pressured", reason, time.Time{}
 		return
 	}
@@ -174,6 +193,7 @@ func (m *spaceManager) evaluate(now time.Time) {
 		s.State, s.Reason, s.RecoveringSince = "pressured", "waiting_for_watermarks", time.Time{}
 		return
 	}
+	m.pressureCause = ""
 	if s.RecoveringSince.IsZero() || now.Before(s.RecoveringSince) {
 		s.RecoveringSince = now.UTC()
 	}
@@ -352,6 +372,39 @@ func (m *spaceManager) finish(res spaceReservation, payload int64, allocated int
 	m.evaluate(m.now())
 }
 
+// Actual capacity decisions exclude adjusted inventory totals. The fresh
+// partition measurement may independently demand recovery.
+func (m *spaceManager) needsCapacity() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := &m.status
+	if s.State != "pressured" || !s.Complete || s.Filesystem.ReadOnly || m.fsReason != "" || m.writeError != "" {
+		return false
+	}
+	switch m.pressureCause {
+	case "low_free", "low_inodes":
+		return true
+	case "high_usage":
+		if s.UsageAdjusted || s.ReservedBytes != 0 {
+			m.requestInventory()
+			return false
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *spaceManager) invalidateInventory() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revision++
+	m.status.Complete = false
+	m.status.InventoryReason = "physical_removal"
+	m.evaluate(m.now())
+	m.requestInventory()
+}
+
 func (m *spaceManager) requestInventory() {
 	select {
 	case m.rescan <- struct{}{}:
@@ -408,6 +461,14 @@ func (s *Service) storePreview(ctx context.Context, key string, bytes []byte, ba
 	m.finish(reservation, int64(len(bytes)), allocated, err)
 	if reason := diskcache.SpaceWriteReason(err); reason != "" {
 		return &SpaceDeferred{reason}
+	}
+	return err
+}
+
+func (s *Service) deletePreviewCache(ctx context.Context, key string) error {
+	err := s.fileCache.Delete(ctx, key)
+	if err == nil && s.space != nil {
+		s.space.invalidateInventory()
 	}
 	return err
 }

@@ -49,6 +49,7 @@ type Service struct {
 	ledger         *cacheledger.Repository
 	orphans        *orphanManager
 	space          *spaceManager
+	capacity       *capacityManager
 	recoveryDone   chan struct{}
 	ledgerClose    sync.Once
 	ledgerCloseErr error
@@ -205,7 +206,6 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 	next.startLedger()
 	if tree != nil && next.ledger != nil {
 		next.orphans = newOrphanManager(tree, next.ledger, enabled, settings.Config.Server.PreviewOrphanGraceHours)
-		go next.orphans.run(next.baseCtx)
 	} else if tree != nil {
 		_ = tree.Close()
 	}
@@ -220,6 +220,14 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 		}
 		next.space = newSpaceManager(spaceTree, spaceConfig)
 		go next.space.run(next.baseCtx)
+		if next.orphans != nil {
+			next.orphans.onUnlink = next.space.invalidateInventory
+			next.capacity = newCapacityManager(next.orphans, next.space)
+			go next.capacity.run(next.baseCtx)
+		}
+	}
+	if next.orphans != nil {
+		go next.orphans.run(next.baseCtx)
 	}
 	service = next
 	return nil
@@ -255,6 +263,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if s.recoveryDone != nil {
 		select {
 		case <-s.recoveryDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if s.capacity != nil {
+		select {
+		case <-s.capacity.done:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -358,6 +373,14 @@ func (s *Service) requestInteractivePreview(ctx context.Context, file iteminfo.E
 		cacheKey = publication.key
 	}
 
+	if foreground {
+		release, err := s.capacity.claim(ctx, cacheKey)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+
 	if result, found, err := s.loadPreviewCache(ctx, cacheKey, publication); err != nil {
 		return nil, fmt.Errorf("failed to load from cache: %w", err)
 	} else if found {
@@ -395,7 +418,7 @@ func (s *Service) loadCached(ctx context.Context, cacheKey string) ([]byte, bool
 		// Older builds stored an empty marker after a failed generation. That
 		// turned a transient failure into a permanent one; delete it and let the
 		// request retry under normal admission.
-		_ = s.fileCache.Delete(ctx, cacheKey)
+		_ = s.deletePreviewCache(ctx, cacheKey)
 		s.stats.cacheCorrupt.Add(1)
 		return nil, false, nil
 	}
@@ -1132,7 +1155,7 @@ func DelThumbs(ctx context.Context, file iteminfo.ExtendedFileInfo) {
 	if err != nil {
 		return
 	}
-	errSmall := service.fileCache.Delete(ctx, small)
+	errSmall := service.deletePreviewCache(ctx, small)
 	unlock()
 	if errSmall != nil {
 		large := CacheKey(cacheHash, "large", 0)
@@ -1140,7 +1163,7 @@ func DelThumbs(ctx context.Context, file iteminfo.ExtendedFileInfo) {
 		if err != nil {
 			return
 		}
-		errLarge := service.fileCache.Delete(ctx, large)
+		errLarge := service.deletePreviewCache(ctx, large)
 		unlock()
 		if errLarge != nil {
 			logger.Debugf("Could not delete thumbnail: %v", file.Name)

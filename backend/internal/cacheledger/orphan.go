@@ -194,7 +194,7 @@ type OrphanCandidate struct {
 
 type OrphanPublication struct {
 	Asset, Variant, Key, Digest, Epoch, Stamp, Proof, Reason string
-	Generated, Size, Since, EligibleAt                       int64
+	Generated, Size, Since, EligibleAt, LastUsed             int64
 	Referenced, Moving, Unproven                             bool
 }
 
@@ -235,7 +235,7 @@ func (r *Repository) OrphanKeys(ctx context.Context, asset string) ([]string, er
 }
 
 func (r *Repository) OrphanPublications(ctx context.Context, key string) ([]OrphanPublication, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT p.asset,p.variant,p.storage_key,p.digest,p.generated_at,p.size,
+	rows, err := r.db.QueryContext(ctx, `SELECT p.asset,p.variant,p.storage_key,p.digest,p.generated_at,p.size,p.last_used_at,
  COALESCE(q.epoch,''),COALESCE(q.stamp,''),COALESCE(c.since,0),COALESCE(c.eligible_at,0),COALESCE(e.proof,''),COALESCE(e.reason,''),
  EXISTS(SELECT 1 FROM refs f WHERE f.asset=p.asset),
  (EXISTS(SELECT 1 FROM moves WHERE asset=p.asset AND state IN ('pending','ambiguous'))
@@ -251,7 +251,7 @@ func (r *Repository) OrphanPublications(ctx context.Context, key string) ([]Orph
 	var out []OrphanPublication
 	for rows.Next() {
 		var p OrphanPublication
-		if err := rows.Scan(&p.Asset, &p.Variant, &p.Key, &p.Digest, &p.Generated, &p.Size, &p.Epoch, &p.Stamp,
+		if err := rows.Scan(&p.Asset, &p.Variant, &p.Key, &p.Digest, &p.Generated, &p.Size, &p.LastUsed, &p.Epoch, &p.Stamp,
 			&p.Since, &p.EligibleAt, &p.Proof, &p.Reason, &p.Referenced, &p.Moving, &p.Unproven); err != nil {
 			return nil, err
 		}
@@ -281,8 +281,12 @@ type OrphanIntent struct {
 }
 
 func (r *Repository) OrphanIntent(ctx context.Context, key, publications string) (OrphanIntent, error) {
+	return r.intent(ctx, "orphan_intents", key, publications)
+}
+
+func (r *Repository) intent(ctx context.Context, table, key, publications string) (OrphanIntent, error) {
 	return readOrphanIntent(r.db.QueryRowContext(ctx, `SELECT rowid,id,storage_key,publications,expected,isolated,state,logical,blocks
- FROM orphan_intents WHERE storage_key=? AND publications=?`, key, publications))
+ FROM `+table+` WHERE storage_key=? AND publications=?`, key, publications))
 }
 
 func readOrphanIntent(row interface{ Scan(...any) error }) (OrphanIntent, error) {
@@ -292,8 +296,12 @@ func readOrphanIntent(row interface{ Scan(...any) error }) (OrphanIntent, error)
 }
 
 func (r *Repository) OrphanIntents(ctx context.Context, after int64) ([]OrphanIntent, error) {
+	return r.intents(ctx, "orphan_intents", after)
+}
+
+func (r *Repository) intents(ctx context.Context, table string, after int64) ([]OrphanIntent, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT rowid,id,storage_key,publications,expected,isolated,state,logical,blocks
- FROM orphan_intents WHERE rowid>? ORDER BY rowid LIMIT ?`, after, OrphanPageSize)
+ FROM `+table+` WHERE rowid>? ORDER BY rowid LIMIT ?`, after, OrphanPageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -311,14 +319,22 @@ func (r *Repository) OrphanIntents(ctx context.Context, after int64) ([]OrphanIn
 
 // ReserveOrphan is called with the physical key and location gates held.
 func (r *Repository) ReserveOrphan(ctx context.Context, i OrphanIntent) (OrphanIntent, error) {
+	return r.reserveIntent(ctx, "orphan_intents", i)
+}
+
+func (r *Repository) reserveIntent(ctx context.Context, table string, i OrphanIntent) (OrphanIntent, error) {
 	i.ID, i.State = newID(), "reserved"
-	_, err := r.db.ExecContext(ctx, `INSERT INTO orphan_intents(id,storage_key,publications,expected,logical,blocks,state)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO `+table+`(id,storage_key,publications,expected,logical,blocks,state)
  VALUES(?,?,?,?,?,?,'reserved')`, i.ID, i.Key, i.Publications, i.Expected, i.Logical, i.Blocks)
 	return i, err
 }
 
 func (r *Repository) OrphanPhase(ctx context.Context, id, state, isolated string) error {
-	_, err := r.db.ExecContext(ctx, "UPDATE orphan_intents SET state=?,isolated=? WHERE id=?", state, isolated, id)
+	return r.intentPhase(ctx, "orphan_intents", id, state, isolated)
+}
+
+func (r *Repository) intentPhase(ctx context.Context, table, id, state, isolated string) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE "+table+" SET state=?,isolated=? WHERE id=?", state, isolated, id)
 	return err
 }
 
@@ -331,26 +347,33 @@ func (r *Repository) SettleOrphan(ctx context.Context, i OrphanIntent, pubs []Or
 	}
 	defer tx.Rollback()
 	for _, p := range pubs {
-		if _, err = tx.ExecContext(ctx, `DELETE FROM results WHERE asset=? AND variant=? AND storage_key=? AND generated_at=?
- AND EXISTS(SELECT 1 FROM orphan_publications q WHERE q.asset=results.asset AND q.variant=results.variant AND q.epoch=?)`,
-			p.Asset, p.Variant, i.Key, p.Generated, p.Epoch); err != nil {
+		if _, err = removeExactPublication(ctx, tx, i.Key, p); err != nil {
 			return err
 		}
 		if _, err = tx.ExecContext(ctx, "DELETE FROM orphan_candidates WHERE asset=? AND NOT EXISTS(SELECT 1 FROM results WHERE asset=?)", p.Asset, p.Asset); err != nil {
 			return err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO orphan_audit VALUES(?,?,?,?,?,?)", i.ID, Digest([]byte(i.Key)), reason, logical, blocks, now.UnixNano()); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM orphan_intents WHERE id=?", i.ID); err != nil {
+	if err := settleIntent(ctx, tx, "orphan_audit", "orphan_intents", i, reason, logical, blocks, now); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+func settleIntent(ctx context.Context, tx *sql.Tx, audit, table string, i OrphanIntent, reason string, logical, blocks int64, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO "+audit+" VALUES(?,?,?,?,?,?)", i.ID, Digest([]byte(i.Key)), reason, logical, blocks, now.UnixNano()); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE id=?", i.ID)
+	return err
+}
+
 func (r *Repository) AdvanceOrphanClock(ctx context.Context, now time.Time) error {
-	res, err := r.db.ExecContext(ctx, `INSERT INTO orphan_clock VALUES(1,?)
+	return r.advanceClock(ctx, "orphan_clock", now)
+}
+
+func (r *Repository) advanceClock(ctx context.Context, table string, now time.Time) error {
+	res, err := r.db.ExecContext(ctx, `INSERT INTO `+table+` VALUES(1,?)
  ON CONFLICT(id) DO UPDATE SET last=excluded.last WHERE last<=excluded.last`, now.UnixNano())
 	if err != nil {
 		return err
@@ -397,7 +420,11 @@ type OrphanAudit struct {
 }
 
 func (r *Repository) OrphanAudit(ctx context.Context) ([]OrphanAudit, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT id,object_id,reason,logical,blocks,finished FROM orphan_audit ORDER BY rowid DESC LIMIT ?", OrphanPageSize)
+	return r.reclaimAudit(ctx, "orphan_audit")
+}
+
+func (r *Repository) reclaimAudit(ctx context.Context, table string) ([]OrphanAudit, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT id,object_id,reason,logical,blocks,finished FROM "+table+" ORDER BY rowid DESC LIMIT ?", OrphanPageSize)
 	if err != nil {
 		return nil, err
 	}
