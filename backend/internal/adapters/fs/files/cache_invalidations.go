@@ -2,9 +2,11 @@ package files
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
+	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/fileutils"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
 )
@@ -18,21 +20,35 @@ func removeResource(source, root, path string, directory bool) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
+	if directory {
+		inventory, err := diskcache.ObserveSourceDirectory(ctx, root, path, 32)
+		if err != nil {
+			return os.RemoveAll(path)
+		}
+		mutation := preview.BeginOrphanDirectory(ctx, repo, source, root, inventory)
+		cancel()
+		err = os.RemoveAll(path)
+		mutation.Finish(err == nil)
+		return err
+	}
 	unlock, err := repo.LockLocations(ctx)
 	if err != nil {
 		return os.RemoveAll(path)
 	}
-	defer unlock()
-	if directory {
-		mutation := preview.BeginOrphanDirectory(ctx, repo, source, root, path)
-		err := os.RemoveAll(path)
-		mutation.Finish(ctx, err == nil)
-		return err
-	}
 	mutation := preview.BeginOrphanMutation(ctx, repo, source, root, path, "delete")
-	err = os.RemoveAll(path)
+	if mutation == nil {
+		unlock()
+		return os.RemoveAll(path)
+	}
+	// A stale file type or a concurrent replacement must never put a
+	// recursive deletion under the location gate.
+	err = os.Remove(path)
 	mutation.Finish(ctx, err == nil && mutation.ProvesUnlinked(false), "")
-	return err
+	unlock()
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return os.RemoveAll(path)
 }
 
 func openResourceWriter(source, root, path string) (*os.File, *preview.OrphanMutation, error) {

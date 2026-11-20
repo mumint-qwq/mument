@@ -24,27 +24,56 @@ const isolateDirectory = ".orphan-reclamation"
 type ReclaimTree struct {
 	fd       int
 	root     string
-	identity DirectoryIdentity
+	identity mountedDirectory
 }
 
 func openDirectoryPath(name string) (int, error) {
 	return unix.Openat2(unix.AT_FDCWD, name, &unix.OpenHow{Flags: safeDir, Resolve: unix.RESOLVE_NO_SYMLINKS})
 }
 
-func directoryIdentity(fd int) (DirectoryIdentity, error) {
+// The mount ID belongs to the current namespace. Device and fsid identify
+// the volume, while inode and birth time distinguish a directory on it.
+type mountedDirectory struct {
+	DirectoryIdentity
+	Mount uint64
+}
+
+func directoryIdentity(fd int) (mountedDirectory, error) {
 	var st unix.Statx_t
 	var fs unix.Statfs_t
 	for _, mount := range []int{unix.STATX_MNT_ID_UNIQUE, unix.STATX_MNT_ID} {
 		mask := unix.STATX_INO | mount
-		if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, mask, &st); err == nil && int(st.Mask)&mask == mask {
-			if err := unix.Fstatfs(fd, &fs); err != nil {
-				return DirectoryIdentity{}, err
-			}
-			return DirectoryIdentity{Dev: unix.Mkdev(st.Dev_major, st.Dev_minor), Ino: st.Ino, Mount: st.Mnt_id,
-				Filesystem: fmt.Sprintf("%x:%v", fs.Type, fs.Fsid)}, nil
+		if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, mask|unix.STATX_BTIME, &st); err != nil || int(st.Mask)&mask != mask || st.Mnt_id == 0 {
+			continue
 		}
+		if err := unix.Fstatfs(fd, &fs); err != nil {
+			return mountedDirectory{}, err
+		}
+		return mountedDirectory{DirectoryIdentity{
+			Dev: unix.Mkdev(st.Dev_major, st.Dev_minor), Ino: st.Ino,
+			Birth: birthTime(st), Filesystem: durableFilesystem(fs),
+		}, st.Mnt_id}, nil
 	}
-	return DirectoryIdentity{}, ErrReclaimScope
+	return mountedDirectory{}, ErrReclaimScope
+}
+
+func birthTime(st unix.Statx_t) int64 {
+	if st.Mask&unix.STATX_BTIME == 0 {
+		return 0
+	}
+	return st.Btime.Sec*1e9 + int64(st.Btime.Nsec)
+}
+
+func durableFilesystem(fs unix.Statfs_t) string {
+	if fs.Fsid.Val == [2]int32{} {
+		return ""
+	}
+	switch uint32(fs.Type) {
+	case unix.EXT4_SUPER_MAGIC, unix.XFS_SUPER_MAGIC, unix.BTRFS_SUPER_MAGIC, unix.TMPFS_MAGIC:
+		return fmt.Sprintf("%x:%v", fs.Type, fs.Fsid.Val)
+	default:
+		return ""
+	}
 }
 
 func openWithin(fd int, name string, flags uint64, mode uint64) (int, error) {
@@ -122,15 +151,40 @@ func (t *ReclaimTree) object(fd int, leaf string) (ObjectStamp, error) {
 	return t.stamp(object)
 }
 
+func (t *ReclaimTree) HasDurableRoot() bool { return t.identity.valid() }
+
+func (t *ReclaimTree) CheckRecordedRoot(expected DirectoryIdentity) error {
+	if !expected.valid() || !t.HasDurableRoot() {
+		return ErrDurableIdentity
+	}
+	if t.identity.DirectoryIdentity != expected {
+		return ErrReclaimIdentity
+	}
+	return t.Check(false)
+}
+
 func (t *ReclaimTree) stamp(fd int) (ObjectStamp, error) {
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	var st unix.Statx_t
+	const basic = unix.STATX_TYPE | unix.STATX_NLINK | unix.STATX_INO | unix.STATX_SIZE |
+		unix.STATX_MTIME | unix.STATX_CTIME | unix.STATX_BLOCKS
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH, basic|unix.STATX_BTIME, &st); err != nil {
 		return ObjectStamp{}, err
+	}
+	if st.Mask&basic != basic {
+		return ObjectStamp{}, ErrReclaimScope
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
 		return ObjectStamp{}, ErrReclaimLinks
 	}
-	return ObjectStamp{t.identity, uint64(st.Dev), st.Ino, st.Size, st.Mtim.Nano(), st.Ctim.Nano(), st.Blocks * 512}, nil
+	stamp := ObjectStamp{
+		Root: t.identity.DirectoryIdentity, Dev: unix.Mkdev(st.Dev_major, st.Dev_minor), Ino: st.Ino,
+		Birth: birthTime(st), Size: int64(st.Size), Mtime: st.Mtime.Sec*1e9 + int64(st.Mtime.Nsec),
+		Ctime: st.Ctime.Sec*1e9 + int64(st.Ctime.Nsec), Blocks: int64(st.Blocks) * 512,
+	}
+	if !stamp.HasDurableIdentity() {
+		return ObjectStamp{}, ErrDurableIdentity
+	}
+	return stamp, nil
 }
 
 func (t *ReclaimTree) OpenKey(key string) (*CacheObject, error) {
@@ -214,6 +268,9 @@ func (o *CacheObject) current() error {
 }
 
 func (o *CacheObject) Verify(ctx context.Context, before ObjectStamp, digest string) error {
+	if err := o.tree.CheckRecordedRoot(before.Root); err != nil {
+		return err
+	}
 	if err := o.current(); err != nil {
 		return err
 	}
@@ -300,6 +357,8 @@ func (o *CacheObject) Unlink(expected ObjectStamp) error {
 	return unix.Fsync(o.dir)
 }
 
+// openParent binds the recorded directories to this namespace's live root
+// and to a parent reached without crossing any mount or symlink.
 func (p SourceProof) openParent() (int, error) {
 	root, err := openDirectoryPath(p.Root)
 	if err != nil {
@@ -310,7 +369,7 @@ func (p SourceProof) openParent() (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	if p.RootID != (DirectoryIdentity{}) && rootID != p.RootID {
+	if rootID.DirectoryIdentity != p.RootID || (p.mount != 0 && p.mount != rootID.Mount) {
 		return -1, ErrReclaimIdentity
 	}
 	rel, err := filepath.Rel(p.Root, p.Parent)
@@ -322,7 +381,11 @@ func (p SourceProof) openParent() (int, error) {
 		return -1, err
 	}
 	parentID, err := directoryIdentity(parent)
-	if err != nil || (p.ParentID != (DirectoryIdentity{}) && parentID != p.ParentID) {
+	if err != nil {
+		unix.Close(parent)
+		return -1, err
+	}
+	if parentID.Mount != rootID.Mount || (p.ParentID != (DirectoryIdentity{}) && parentID.DirectoryIdentity != p.ParentID) {
 		unix.Close(parent)
 		return -1, ErrReclaimIdentity
 	}
@@ -330,8 +393,8 @@ func (p SourceProof) openParent() (int, error) {
 }
 
 func (p SourceProof) Check() error {
-	if p.RootID == (DirectoryIdentity{}) || p.ParentID == (DirectoryIdentity{}) {
-		return ErrReclaimScope
+	if !p.RootID.valid() || !p.ParentID.valid() {
+		return ErrDurableIdentity
 	}
 	fd, err := p.openParent()
 	if err == nil {
@@ -340,30 +403,40 @@ func (p SourceProof) Check() error {
 	return err
 }
 
-func ObserveSource(root, path string) (*SourceObservation, error) {
+func observeSourceParent(root, path string) (SourceProof, int, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return nil, err
+		return SourceProof{}, -1, err
 	}
-	p := SourceProof{Root: absolute, Parent: filepath.Dir(path)}
-	r, err := openDirectoryPath(absolute)
+	fd, err := openDirectoryPath(absolute)
 	if err != nil {
-		return nil, err
+		return SourceProof{}, -1, err
 	}
-	p.RootID, err = directoryIdentity(r)
-	unix.Close(r)
+	defer unix.Close(fd)
+	id, err := directoryIdentity(fd)
 	if err != nil {
-		return nil, err
+		return SourceProof{}, -1, err
 	}
-	parent, err := p.openParent()
+	proof := SourceProof{Root: absolute, Parent: filepath.Dir(path), RootID: id.DirectoryIdentity, mount: id.Mount}
+	parent, err := proof.openParent()
+	if err != nil {
+		return SourceProof{}, -1, err
+	}
+	parentID, err := directoryIdentity(parent)
+	if err != nil {
+		unix.Close(parent)
+		return SourceProof{}, -1, err
+	}
+	proof.ParentID = parentID.DirectoryIdentity
+	return proof, parent, nil
+}
+
+func ObserveSource(root, path string) (*SourceObservation, error) {
+	p, parent, err := observeSourceParent(root, path)
 	if err != nil {
 		return nil, err
 	}
 	defer unix.Close(parent)
-	p.ParentID, err = directoryIdentity(parent)
-	if err != nil {
-		return nil, err
-	}
 	fd, err := openWithin(parent, filepath.Base(path), unix.O_PATH, 0)
 	if err != nil {
 		return nil, err
@@ -437,6 +510,8 @@ func ReclaimReason(err error) string {
 		return "read_only"
 	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM):
 		return "permission"
+	case errors.Is(err, ErrDurableIdentity):
+		return "durable_identity_unavailable"
 	case errors.Is(err, ErrReclaimScope):
 		return "scope_unavailable"
 	case errors.Is(err, ErrReclaimIdentity):
@@ -453,35 +528,17 @@ func ReclaimReason(err error) string {
 // ObserveSourceDirectory inventories at most limit entries on the same
 // filesystem. Only the surviving parent is used after a complete deletion.
 func ObserveSourceDirectory(ctx context.Context, root, path string, limit int) (*SourceDirectory, error) {
-	absolute, err := filepath.Abs(root)
-	if err != nil {
-		return nil, err
-	}
-	proof := SourceProof{Root: absolute, Parent: filepath.Dir(path)}
-	rootFD, err := openDirectoryPath(absolute)
-	if err != nil {
-		return nil, err
-	}
-	proof.RootID, err = directoryIdentity(rootFD)
-	unix.Close(rootFD)
-	if err != nil {
-		return nil, err
-	}
-	parent, err := proof.openParent()
+	proof, parent, err := observeSourceParent(root, path)
 	if err != nil {
 		return nil, err
 	}
 	defer unix.Close(parent)
-	proof.ParentID, err = directoryIdentity(parent)
-	if err != nil {
-		return nil, err
-	}
 	name := filepath.Base(path)
 	fd, err := openWithin(parent, name, safeDir, 0)
 	if err != nil {
 		return nil, err
 	}
-	d := &SourceDirectory{Proof: proof, file: os.NewFile(uintptr(fd), "source directory"), name: name}
+	d := &SourceDirectory{Proof: proof, file: os.NewFile(uintptr(fd), "source directory"), path: path}
 	if err := walkSourceDirectory(ctx, d.file, path, 1, &limit, &d.Files); err != nil {
 		d.Close()
 		return nil, err
@@ -553,6 +610,23 @@ func walkSourceDirectory(ctx context.Context, dir *os.File, absolute string, dep
 	return nil
 }
 
+// Contains confirms the observed file is reachable from the pinned
+// inventory, even if a concurrent operation changed the directory name.
+func (d *SourceDirectory) Contains(path string, info os.FileInfo) bool {
+	relative, err := filepath.Rel(d.path, path)
+	if err != nil || !filepath.IsLocal(relative) {
+		return false
+	}
+	fd, err := openWithin(int(d.file.Fd()), relative, unix.O_PATH, 0)
+	if err != nil {
+		return false
+	}
+	file := os.NewFile(uintptr(fd), "source")
+	defer file.Close()
+	actual, err := file.Stat()
+	return err == nil && os.SameFile(info, actual)
+}
+
 func (d *SourceDirectory) Removed() bool {
 	var st unix.Stat_t
 	if unix.Fstat(int(d.file.Fd()), &st) != nil || st.Nlink != 0 {
@@ -563,7 +637,7 @@ func (d *SourceDirectory) Removed() bool {
 		return false
 	}
 	defer unix.Close(parent)
-	fd, err := openWithin(parent, d.name, unix.O_PATH, 0)
+	fd, err := openWithin(parent, filepath.Base(d.path), unix.O_PATH, 0)
 	if err == nil {
 		unix.Close(fd)
 	}

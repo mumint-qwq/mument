@@ -142,19 +142,12 @@ func TestOrphanSingleDeleteDefaultAndGrace(t *testing.T) {
 }
 
 func TestOrphanRecoverDurablePhases(t *testing.T) {
-	for _, point := range []string{"reserved", "renamed", "isolated", "unlinked"} {
+	for _, point := range []string{"reserved", "moving", "renamed", "isolated", "unlinked"} {
 		t.Run(point, func(t *testing.T) {
 			f := startOrphanFixture(t)
 			due := f.remove(t).Add(orphanGrace)
 			require.NoError(t, f.s.Shutdown(t.Context()))
-			child := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestOrphanCrashChild$")
-			child.Env = append(os.Environ(), "MUMENT_ORPHAN_CRASH="+point,
-				"MUMENT_ORPHAN_ROOT="+f.root, "MUMENT_ORPHAN_CACHE="+f.cache,
-				"MUMENT_ORPHAN_NOW="+strconv.FormatInt(due.UnixNano(), 10))
-			raw, err := child.CombinedOutput()
-			var exit *exec.ExitError
-			require.ErrorAs(t, err, &exit, "%s", raw)
-			require.Equal(t, 72, exit.ExitCode(), "%s", raw)
+			f.crashAt(t, due, point)
 			f.start(t)
 			<-f.s.orphans.done
 			disabled := f.step(t, due, true)
@@ -208,6 +201,21 @@ func TestOrphanOtherWriterRefused(t *testing.T) {
 	f := startOrphanFixture(t)
 	_, err := diskcache.OpenReclaimTree(f.cache)
 	require.ErrorIs(t, err, diskcache.ErrReclaimBusy)
+}
+
+func (f *orphanFixture) subprocessEnv(now time.Time) []string {
+	return append(os.Environ(), "MUMENT_ORPHAN_ROOT="+f.root, "MUMENT_ORPHAN_CACHE="+f.cache,
+		"MUMENT_ORPHAN_NOW="+strconv.FormatInt(now.UnixNano(), 10))
+}
+
+func (f *orphanFixture) crashAt(t *testing.T, now time.Time, phase string) {
+	t.Helper()
+	child := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestOrphanCrashChild$")
+	child.Env = append(f.subprocessEnv(now), "MUMENT_ORPHAN_CRASH="+phase)
+	raw, err := child.CombinedOutput()
+	var exit *exec.ExitError
+	require.ErrorAs(t, err, &exit, "%s", raw)
+	require.Equal(t, 72, exit.ExitCode(), "%s", raw)
 }
 
 func TestOrphanCrashChild(t *testing.T) {
@@ -341,35 +349,128 @@ func TestOrphanMoveIntentProtectsOldReference(t *testing.T) {
 	require.FileExists(t, f.physical)
 }
 
-func TestOrphanReplacementEpochProtectsNewBytes(t *testing.T) {
+func TestOrphanReplacementEpochLifecycle(t *testing.T) {
+	for _, phase := range []string{"reserved", "moving", "isolated"} {
+		t.Run(phase, func(t *testing.T) {
+			f := startOrphanFixture(t)
+			firstDue := f.remove(t).Add(orphanGrace)
+			<-f.s.orphans.done
+			f.s.orphans.enabled = true
+			f.s.orphans.checkpoint = func(stage string) error {
+				if stage == phase {
+					return errors.New("stop old publication")
+				}
+				return nil
+			}
+			require.Equal(t, 1, f.step(t, firstDue, true).Reasons["interrupted"])
+			f.s.orphans.checkpoint = nil
+			intents, err := f.s.ledger.OrphanIntents(t.Context(), 0)
+			require.NoError(t, err)
+			require.Len(t, intents, 1)
+			old := intents[0]
+			isolation := filepath.Join(f.cache, "diskcache", ".orphan-reclamation", old.ID)
+			var retained []byte
+			if phase == "isolated" {
+				retained, err = os.ReadFile(isolation)
+				require.NoError(t, err)
+			} else {
+				require.NoFileExists(t, isolation)
+			}
+
+			ref := f.addReference(t, "replacement.jpg")
+			data := []byte("new publication under the same key")
+			require.NoError(t, f.s.fileCache.Store(t.Context(), f.key, data))
+			stamp := f.s.orphans.publicationStamp(f.key)
+			require.NotEmpty(t, stamp)
+			_, err = f.s.ledger.PublishObserved(t.Context(), ref, f.variant, f.key, data, stamp)
+			require.NoError(t, err)
+			recovered := f.step(t, firstDue, true)
+			require.Zero(t, recovered.Unlinked)
+			still, err := os.ReadFile(f.physical)
+			require.NoError(t, err)
+			require.Equal(t, data, still)
+			intents, err = f.s.ledger.OrphanIntents(t.Context(), 0)
+			require.NoError(t, err)
+			if phase == "reserved" {
+				require.Equal(t, 1, recovered.Reasons["superseded_reservation"])
+				require.Empty(t, intents)
+				audit, err := f.s.ledger.OrphanAudit(t.Context())
+				require.NoError(t, err)
+				require.Len(t, audit, 1)
+				require.Equal(t, old.ID, audit[0].ID)
+				require.Zero(t, audit[0].Logical)
+				require.Zero(t, audit[0].Blocks)
+			} else {
+				require.Equal(t, 1, recovered.Reasons["publication_changed"])
+				require.Len(t, intents, 1)
+				require.Equal(t, "held", intents[0].State)
+				require.Equal(t, old.ID, intents[0].ID)
+			}
+
+			require.NoError(t, f.s.Shutdown(t.Context()))
+			f.start(t)
+			<-f.s.orphans.done
+			f.s.orphans.enabled = true
+			last := f.removePath(t, filepath.Join(f.root, "replacement.jpg"))
+			due := last.Add(orphanGrace)
+			wait := f.step(t, due.Add(-time.Nanosecond), false)
+			require.Equal(t, 1, wait.Waiting, "%+v", wait)
+			trial := f.step(t, due, false)
+			require.Equal(t, 1, trial.Due, "%+v", trial)
+			done := f.step(t, due, true)
+			require.Equal(t, 1, done.Unlinked, "%+v", done)
+			require.Equal(t, int64(len(data)), done.UnlinkedBytes)
+			require.NoFileExists(t, f.physical)
+			audit, err := f.s.ledger.OrphanAudit(t.Context())
+			require.NoError(t, err)
+			require.NotEqual(t, old.ID, audit[0].ID)
+			require.Equal(t, "unlinked", audit[0].Reason)
+			intents, err = f.s.ledger.OrphanIntents(t.Context(), 0)
+			require.NoError(t, err)
+			if phase == "reserved" {
+				require.Empty(t, intents)
+			} else {
+				require.Len(t, intents, 1)
+				require.Equal(t, old.ID, intents[0].ID)
+				require.Equal(t, "held", intents[0].State)
+			}
+			if phase == "isolated" {
+				actual, err := os.ReadFile(isolation)
+				require.NoError(t, err)
+				require.Equal(t, retained, actual)
+			}
+		})
+	}
+}
+
+func TestOrphanIsolatedObjectReplacement(t *testing.T) {
 	f := startOrphanFixture(t)
 	due := f.remove(t).Add(orphanGrace)
+	require.NoError(t, f.s.Shutdown(t.Context()))
+	f.crashAt(t, due, "isolated")
+	f.start(t)
 	<-f.s.orphans.done
 	f.s.orphans.enabled = true
-	f.s.orphans.checkpoint = func(stage string) error {
-		if stage == "isolated" {
-			return errors.New("stop in quarantine")
-		}
-		return nil
-	}
-	require.Equal(t, 1, f.step(t, due, true).Reasons["interrupted"])
-	f.s.orphans.checkpoint = nil
-	ref := f.addReference(t, "replacement.jpg")
-	data := []byte("new publication under the same key")
-	require.NoError(t, f.s.fileCache.Store(t.Context(), f.key, data))
-	stamp := f.s.orphans.publicationStamp(f.key)
-	require.NotEmpty(t, stamp)
-	_, err := f.s.ledger.PublishObserved(t.Context(), ref, f.variant, f.key, data, stamp)
-	require.NoError(t, err)
-	recovered := f.step(t, due, true)
-	require.Equal(t, 1, recovered.Reasons["publication_changed"])
-	require.Zero(t, recovered.Unlinked)
-	still, err := os.ReadFile(f.physical)
-	require.NoError(t, err)
-	require.Equal(t, data, still)
 	intents, err := f.s.ledger.OrphanIntents(t.Context(), 0)
 	require.NoError(t, err)
-	require.Equal(t, "held", intents[0].State)
+	require.Len(t, intents, 1)
+	isolation := filepath.Join(f.cache, "diskcache", ".orphan-reclamation", intents[0].ID)
+	data, err := os.ReadFile(isolation)
+	require.NoError(t, err)
+	before, err := os.Stat(isolation)
+	require.NoError(t, err)
+	saved := isolation + ".saved"
+	require.NoError(t, os.Rename(isolation, saved))
+	require.NoError(t, os.WriteFile(isolation, data, 0o600))
+	require.NoError(t, os.Chtimes(isolation, before.ModTime(), before.ModTime()))
+	report := f.step(t, due, true)
+	require.Zero(t, report.Unlinked)
+	require.Equal(t, 1, report.Reasons["isolation_changed"])
+	for _, path := range []string{isolation, saved} {
+		actual, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, data, actual)
+	}
 }
 
 func TestOrphanSymlinkAndSourceIdentity(t *testing.T) {
@@ -463,4 +564,82 @@ func TestOrphanReadKeyGateAndCancellation(t *testing.T) {
 	unlock()
 	require.FileExists(t, f.physical)
 	require.Equal(t, 1, f.step(t, due, true).Unlinked)
+}
+
+func TestOrphanDirectoryAllowsConcurrentCMove(t *testing.T) {
+	f := startOrphanFixture(t)
+	repo := f.s.ledger
+	dir := filepath.Join(f.root, "folder")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	confirmed := f.addReference(t, "folder/deleted.jpg")
+	moved := f.addReference(t, "folder/moved.jpg")
+	stale := f.addReference(t, "folder/stale.jpg")
+	neighbor := f.addReference(t, "folder-neighbor.jpg")
+	inventory, err := diskcache.ObserveSourceDirectory(t.Context(), f.root, dir, 32)
+	require.NoError(t, err)
+	mutation := BeginOrphanDirectory(t.Context(), repo, "orphan-test", f.root, inventory)
+	require.NotNil(t, mutation)
+	require.Len(t, mutation.mutations, 3)
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	unlock, err := repo.LockLocations(ctx)
+	require.NoError(t, err)
+	var movedRef, newRef cacheledger.Ref
+	func() {
+		defer unlock()
+		target := filepath.Join(f.root, "moved-out.jpg")
+		ns, name, ok := cacheledger.Location(f.root, target)
+		require.True(t, ok)
+		moves, err := repo.Prepare(ctx, []cacheledger.Move{{Ref: moved, TargetSource: ns, TargetPath: name}})
+		require.NoError(t, err)
+		require.Len(t, moves, 1)
+		require.NoError(t, os.Rename(filepath.Join(dir, "moved.jpg"), target))
+		movedVersion, err := cacheledger.Observe(target)
+		require.NoError(t, err)
+		require.NoError(t, repo.CommitRename(ctx, moves[0].ID, movedVersion))
+		movedRef = cacheledger.Ref{Source: ns, Path: name, Asset: moved.Asset, Version: movedVersion}
+
+		replacement := filepath.Join(f.root, "different-version")
+		require.NoError(t, os.WriteFile(replacement, []byte("different file"), 0o600))
+		path := filepath.Join(dir, "stale.jpg")
+		require.NoError(t, os.Rename(replacement, path))
+		version, err := cacheledger.Observe(path)
+		require.NoError(t, err)
+		newRef, err = repo.Resolve(ctx, stale.Source, stale.Path, version)
+		require.NoError(t, err)
+		require.NotEqual(t, stale.Asset, newRef.Asset)
+	}()
+	require.NoError(t, os.RemoveAll(dir))
+	mutation.Finish(true)
+	for _, ref := range []cacheledger.Ref{movedRef, neighbor, newRef} {
+		actual, found, err := repo.Existing(t.Context(), ref.Source, ref.Path, ref.Version)
+		require.NoError(t, err)
+		require.True(t, found, "%+v", ref)
+		require.Equal(t, ref, actual)
+	}
+	_, found, err := repo.Existing(t.Context(), confirmed.Source, confirmed.Path, confirmed.Version)
+	require.NoError(t, err)
+	require.False(t, found)
+	events, err := repo.OrphanEvents(t.Context())
+	require.NoError(t, err)
+	require.Len(t, events, 3)
+	states := make(map[string]int)
+	for _, event := range events {
+		states[event.State]++
+	}
+	require.Equal(t, map[string]int{"confirmed": 1, "unproven": 1, "pending": 1}, states)
+	require.Zero(t, f.step(t, time.Now().Add(orphanGrace), false).Due)
+	require.FileExists(t, f.physical)
+}
+
+func TestOrphanLegacyProofLacksDurableIdentity(t *testing.T) {
+	f := startOrphanFixture(t)
+	due := f.remove(t).Add(orphanGrace)
+	// Older proof rows carry inode and mount ID but no directory birth time.
+	f.sql(t, `UPDATE orphan_events SET proof=json_remove(proof,'$.RootID.Birth','$.ParentID.Birth')`)
+	report := f.step(t, due, false)
+	require.Equal(t, 1, report.Reasons["source_durable_identity_unavailable"])
+	require.Zero(t, report.Due)
+	require.FileExists(t, f.physical)
 }

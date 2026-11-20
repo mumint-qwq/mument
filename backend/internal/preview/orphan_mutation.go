@@ -38,7 +38,7 @@ func BeginOrphanMutation(ctx context.Context, repo *cacheledger.Repository, sour
 	return beginOrphanMutation(ctx, repo, source, root, path, reason, nil)
 }
 
-func beginOrphanMutation(ctx context.Context, repo *cacheledger.Repository, source, root, path, reason string, retainedParent *diskcache.SourceProof) *OrphanMutation {
+func beginOrphanMutation(ctx context.Context, repo *cacheledger.Repository, source, root, path, reason string, inventory *diskcache.SourceDirectory) *OrphanMutation {
 	if repo == nil || repo != OrphanTracking() {
 		return nil
 	}
@@ -62,11 +62,11 @@ func beginOrphanMutation(ctx context.Context, repo *cacheledger.Repository, sour
 		return nil
 	}
 	sourceProof := old.Proof
-	if retainedParent != nil {
-		if sourceProof.RootID != retainedParent.RootID {
+	if inventory != nil {
+		if sourceProof.RootID != inventory.Proof.RootID || !inventory.Contains(path, old.Info) {
 			return nil
 		}
-		sourceProof = *retainedParent
+		sourceProof = inventory.Proof
 	}
 	proof, _ := json.Marshal(orphanSourceProof{source, sourceProof})
 	id, err := repo.StageInvalidation(ctx, cacheledger.Invalidation{Ref: ref, Reason: reason, Proof: string(proof)}, time.Now())
@@ -126,35 +126,60 @@ func (m *OrphanMutation) Finish(ctx context.Context, proven bool, move string) {
 // OrphanDirectory groups only entries whose pre-operation identities fit in
 // one small, complete same-mount inventory.
 type OrphanDirectory struct {
-	directory *diskcache.SourceDirectory
-	mutations []*OrphanMutation
+	directory  *diskcache.SourceDirectory
+	mutations  []*OrphanMutation
+	incomplete bool
 }
 
-func BeginOrphanDirectory(ctx context.Context, repo *cacheledger.Repository, source, root, path string) *OrphanDirectory {
-	directory, err := diskcache.ObserveSourceDirectory(ctx, root, path, 32)
+// BeginOrphanDirectory takes ownership of the already bounded inventory. It
+// serializes staging with C, then releases the gate before recursive removal.
+func BeginOrphanDirectory(ctx context.Context, repo *cacheledger.Repository, source, root string, directory *diskcache.SourceDirectory) *OrphanDirectory {
+	unlock, err := repo.LockLocations(ctx)
 	if err != nil {
+		directory.Close()
 		return nil
 	}
+	defer unlock()
+
 	group := &OrphanDirectory{directory: directory}
 	for _, child := range directory.Files {
 		if ctx.Err() != nil {
-			group.Finish(ctx, false)
-			return nil
+			break
 		}
-		if m := beginOrphanMutation(ctx, repo, source, root, child, "directory_delete", &directory.Proof); m != nil {
+		if m := beginOrphanMutation(ctx, repo, source, root, child, "directory_delete", directory); m != nil {
 			group.mutations = append(group.mutations, m)
 		}
 	}
+	group.incomplete = ctx.Err() != nil
 	return group
 }
 
-func (d *OrphanDirectory) Finish(ctx context.Context, successful bool) {
+func (d *OrphanDirectory) Finish(successful bool) {
 	if d == nil {
 		return
 	}
 	defer d.directory.Close()
-	removed := successful && d.directory.Removed()
-	for _, m := range d.mutations {
-		m.Finish(ctx, removed && m.old.LostLink(), "")
+	if len(d.mutations) == 0 {
+		return
+	}
+
+	removed := successful && !d.incomplete && d.directory.Removed()
+	proven := make([]bool, len(d.mutations))
+	for i, m := range d.mutations {
+		proven[i] = removed && m.old.LostLink()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	unlock, err := d.mutations[0].repo.LockLocations(ctx)
+	if err != nil {
+		for _, m := range d.mutations {
+			m.old.Close()
+		}
+		logger.Warningf("preview directory invalidations awaiting reconciliation")
+		return
+	}
+	defer unlock()
+	for i, m := range d.mutations {
+		m.Finish(ctx, proven[i], "")
 	}
 }

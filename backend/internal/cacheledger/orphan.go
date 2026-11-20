@@ -23,10 +23,6 @@ CREATE TABLE IF NOT EXISTS orphan_candidates (
 CREATE TABLE IF NOT EXISTS orphan_publications (
  asset TEXT NOT NULL, variant TEXT NOT NULL, epoch TEXT NOT NULL, generated INTEGER NOT NULL, stamp TEXT NOT NULL,
  PRIMARY KEY(asset,variant), FOREIGN KEY(asset,variant) REFERENCES results(asset,variant) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS orphan_intents (
- scan_id INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, storage_key TEXT NOT NULL UNIQUE, publications TEXT NOT NULL,
- expected TEXT NOT NULL, isolated TEXT NOT NULL DEFAULT '', logical INTEGER NOT NULL, blocks INTEGER NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('reserved','isolated','removed','held')));
 CREATE TABLE IF NOT EXISTS orphan_audit (
  id TEXT PRIMARY KEY, object_id TEXT NOT NULL, reason TEXT NOT NULL, logical INTEGER NOT NULL, blocks INTEGER NOT NULL, finished INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS orphan_clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
@@ -50,6 +46,41 @@ CREATE TRIGGER IF NOT EXISTS orphan_cancel_update AFTER UPDATE OF asset ON refs 
  DELETE FROM orphan_candidates WHERE asset=NEW.asset;
 END;
 `
+
+const orphanIntentTable = `(
+ scan_id INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, storage_key TEXT NOT NULL, publications TEXT NOT NULL,
+ expected TEXT NOT NULL, isolated TEXT NOT NULL DEFAULT '', logical INTEGER NOT NULL, blocks INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('reserved','moving','isolated','removed','held')));`
+
+func initOrphanIntents(tx *sql.Tx) error {
+	var table, indexed bool
+	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='orphan_intents'),
+ EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='orphan_intents_publication')`).Scan(&table, &indexed)
+	if err != nil || indexed {
+		return err
+	}
+	if table {
+		// A legacy reservation could already have moved its object. Preserve
+		// the record and isolation name and treat that phase as uncertain.
+		_, err = tx.Exec(`CREATE TABLE orphan_intents_next ` + orphanIntentTable + `
+ INSERT INTO orphan_intents_next SELECT scan_id,id,storage_key,publications,expected,isolated,logical,blocks,
+ CASE state WHEN 'reserved' THEN 'moving' ELSE state END FROM orphan_intents;
+ INSERT INTO sqlite_sequence(name,seq)
+ SELECT 'orphan_intents_next',seq FROM sqlite_sequence WHERE name='orphan_intents'
+ AND NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='orphan_intents_next');
+ UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='orphan_intents'),0))
+ WHERE name='orphan_intents_next';
+ DROP TABLE orphan_intents;
+ ALTER TABLE orphan_intents_next RENAME TO orphan_intents;`)
+	} else {
+		_, err = tx.Exec("CREATE TABLE orphan_intents " + orphanIntentTable)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec("CREATE UNIQUE INDEX orphan_intents_publication ON orphan_intents(storage_key,publications)")
+	return err
+}
 
 type Invalidation struct {
 	Reason, Proof string
@@ -249,9 +280,9 @@ type OrphanIntent struct {
 	Row, Logical, Blocks                             int64
 }
 
-func (r *Repository) OrphanIntent(ctx context.Context, key string) (OrphanIntent, error) {
+func (r *Repository) OrphanIntent(ctx context.Context, key, publications string) (OrphanIntent, error) {
 	return readOrphanIntent(r.db.QueryRowContext(ctx, `SELECT rowid,id,storage_key,publications,expected,isolated,state,logical,blocks
- FROM orphan_intents WHERE storage_key=?`, key))
+ FROM orphan_intents WHERE storage_key=? AND publications=?`, key, publications))
 }
 
 func readOrphanIntent(row interface{ Scan(...any) error }) (OrphanIntent, error) {
@@ -278,7 +309,7 @@ func (r *Repository) OrphanIntents(ctx context.Context, after int64) ([]OrphanIn
 	return out, rows.Err()
 }
 
-// Reserve is called with the physical key and location gates held.
+// ReserveOrphan is called with the physical key and location gates held.
 func (r *Repository) ReserveOrphan(ctx context.Context, i OrphanIntent) (OrphanIntent, error) {
 	i.ID, i.State = newID(), "reserved"
 	_, err := r.db.ExecContext(ctx, `INSERT INTO orphan_intents(id,storage_key,publications,expected,logical,blocks,state)

@@ -56,6 +56,8 @@ fi
 
 record mount env MUMENT_ORPHAN_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private \
   "$out/e2-preview-tests" -test.run '^TestOrphanPrivateMounts$' -test.v
+record restart-namespaces env MUMENT_ORPHAN_NAMESPACE_TEST=1 \
+  "$out/e2-preview-tests" -test.run '^TestOrphanRestartAcrossMountNamespaces$' -test.v
 record e1 env GO="$go_cmd" "$root/scripts/development/trial-007e.sh" "$out/e1"
 
 embed_dir="$root/backend/internal/web/embed"
@@ -66,7 +68,7 @@ if ! compgen -G "$embed_dir/*" >/dev/null; then
 fi
 record core "$go_cmd" -C "$root/backend" test -race -count=1 -v \
   ./internal/preview ./internal/previewwarmup ./internal/cacheledger \
-  ./internal/adapters/fs/diskcache ./internal/database/sql ./internal/cachetrial
+  ./internal/adapters/fs/diskcache ./internal/adapters/fs/files ./internal/database/sql ./internal/cachetrial
 record entrypoints env MUMENT_MOVE_HANDLER_TRANSPORT=1 "$go_cmd" -C "$root/backend" \
   test -race ./internal/web -run '^(TestPreviewOrphan|TestLedgerMove|TestPreviewWarmupHTTP)' -count=1 -v
 record move-1000 env MUMENT_MOVE_HANDLER_TRANSPORT=1 MUMENT_MOVE_IMAGE_COUNT=1000 "$go_cmd" -C "$root/backend" \

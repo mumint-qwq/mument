@@ -12,6 +12,8 @@ type CacheObject struct{}
 
 func OpenReclaimTree(string) (*ReclaimTree, error)                     { return nil, ErrReclaimScope }
 func (*ReclaimTree) Close() error                                      { return nil }
+func (*ReclaimTree) HasDurableRoot() bool                              { return false }
+func (*ReclaimTree) CheckRecordedRoot(DirectoryIdentity) error         { return ErrReclaimScope }
 func (*ReclaimTree) Check(bool) error                                  { return ErrReclaimScope }
 func (*ReclaimTree) OpenKey(string) (*CacheObject, error)              { return nil, ErrReclaimScope }
 func (*ReclaimTree) OpenIsolated(string, bool) (*CacheObject, error)   { return nil, ErrReclaimScope }
@@ -29,5 +31,6 @@ func ReclaimReason(error) string                                       { return 
 func ObserveSourceDirectory(context.Context, string, string, int) (*SourceDirectory, error) {
 	return nil, ErrReclaimScope
 }
-func (*SourceDirectory) Removed() bool    { return false }
-func (*SourceObservation) LostLink() bool { return false }
+func (*SourceDirectory) Contains(string, os.FileInfo) bool { return false }
+func (*SourceDirectory) Removed() bool                     { return false }
+func (*SourceObservation) LostLink() bool                  { return false }

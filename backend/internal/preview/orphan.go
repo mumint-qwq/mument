@@ -178,6 +178,11 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 		r.Reasons[diskcache.ReclaimReason(err)]++
 		return r
 	}
+	if !o.tree.HasDurableRoot() {
+		r.NextCandidate, r.NextIntent, r.NextObject = assetsAfter, intentsAfter, cursor.Object
+		r.Reasons["durable_identity_unavailable"]++
+		return r
+	}
 	if apply {
 		if err := o.repo.AdvanceOrphanClock(ctx, now); err != nil {
 			r.NextCandidate, r.NextIntent, r.NextObject = assetsAfter, intentsAfter, cursor.Object
@@ -197,8 +202,9 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 			r.NextIntent = intentsAfter
 			break
 		}
-		visited[intent.Key] = true
-		o.inspect(ctx, &r, intent.Key, intent, now, apply, &budget)
+		if o.inspect(ctx, &r, intent.Key, intent, now, apply, &budget) {
+			visited[intent.Key] = true
+		}
 		intentsAfter = intent.Row
 	}
 	if len(intents) == cacheledger.OrphanPageSize && r.NextIntent == 0 {
@@ -238,14 +244,7 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 					break
 				}
 				if !visited[key] {
-					intent, err := o.repo.OrphanIntent(ctx, key)
-					if err != nil && !errors.Is(err, sql.ErrNoRows) {
-						r.Reasons["ledger_error"]++
-						r.NextCandidate, r.NextObject = assetsAfter, cursor.Object
-						complete = false
-						break
-					}
-					o.inspect(ctx, &r, key, intent, now, apply, &budget)
+					o.inspect(ctx, &r, key, cacheledger.OrphanIntent{}, now, apply, &budget)
 					visited[key] = true
 					remaining--
 				}
@@ -271,13 +270,16 @@ func (o *orphanManager) report(parent context.Context, cursor OrphanCursor, appl
 	return r
 }
 
-func (proof orphanSourceProof) online() bool {
+func (proof orphanSourceProof) checkOnline() error {
 	idx := indexing.GetIndex(proof.Source)
 	if idx == nil {
-		return false
+		return diskcache.ErrReclaimScope
 	}
 	root, err := filepath.Abs(idx.Path)
-	return err == nil && root == proof.Root && proof.Check() == nil
+	if err != nil || root != proof.Root {
+		return diskcache.ErrReclaimIdentity
+	}
+	return proof.Check()
 }
 
 func qualifyOrphan(pubs []cacheledger.OrphanPublication, now time.Time, sample *OrphanSample) string {
@@ -302,7 +304,13 @@ func qualifyOrphan(pubs []cacheledger.OrphanPublication, now time.Time, sample *
 			return "shared_publication_mismatch"
 		}
 		var proof orphanSourceProof
-		if json.Unmarshal([]byte(p.Proof), &proof) != nil || !proof.online() {
+		if json.Unmarshal([]byte(p.Proof), &proof) != nil {
+			return "source_identity_unavailable"
+		}
+		if err := proof.checkOnline(); err != nil {
+			if errors.Is(err, diskcache.ErrDurableIdentity) {
+				return "source_durable_identity_unavailable"
+			}
 			return "source_identity_unavailable"
 		}
 		if p.Since > since {
@@ -326,7 +334,7 @@ func qualifyOrphan(pubs []cacheledger.OrphanPublication, now time.Time, sample *
 	return ""
 }
 
-func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string, intent cacheledger.OrphanIntent, now time.Time, apply bool, budget *int64) {
+func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string, intent cacheledger.OrphanIntent, now time.Time, apply bool, budget *int64) (currentIntent bool) {
 	sample := OrphanSample{ID: cacheledger.Digest([]byte(key))}
 	defer func() { r.record(sample) }()
 	if !strings.HasPrefix(key, "c-raster/") {
@@ -351,8 +359,16 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 		return
 	}
 	set := cacheledger.OrphanPublicationSet(pubs)
+	if intent.ID == "" && set != "" {
+		intent, err = o.repo.OrphanIntent(ctx, key, set)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			sample.Reason = "ledger_error"
+			return
+		}
+	}
 	sample.Reason = qualifyOrphan(pubs, now, &sample)
 	if intent.ID != "" {
+		currentIntent = set != "" && intent.Publications == set
 		if !apply {
 			sample.Reason = "intent_" + intent.State
 			return
@@ -369,6 +385,10 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 	var expected diskcache.ObjectStamp
 	if json.Unmarshal([]byte(pubs[0].Stamp), &expected) != nil || expected.Size != pubs[0].Size {
 		sample.Reason = "untracked_publication"
+		return
+	}
+	if !expected.HasDurableIdentity() {
+		sample.Reason = "durable_identity_unavailable"
 		return
 	}
 	object, err := o.tree.OpenKey(key)
@@ -422,6 +442,7 @@ func (o *orphanManager) inspect(ctx context.Context, r *OrphanReport, key string
 		return
 	}
 	sample.Reason = o.resume(ctx, r, "", rechecked, intent, set, now, budget, true)
+	return
 }
 
 func (o *orphanManager) interrupted(phase string) bool {
@@ -437,7 +458,16 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 	if json.Unmarshal([]byte(i.Expected), &old) != nil || old.Size <= 0 || old.Size > orphanMaxFile || old.Size != i.Logical {
 		return "invalid_intent"
 	}
+	if !old.HasDurableIdentity() {
+		return "durable_identity_unavailable"
+	}
+	if err := o.tree.CheckRecordedRoot(old.Root); err != nil {
+		return diskcache.ReclaimReason(err)
+	}
 	if set != i.Publications || len(pubs) == 0 {
+		if i.State == "reserved" && o.isolationAbsent(i.ID) {
+			return o.settle(ctx, i, nil, "superseded_reservation", 0, 0, now)
+		}
 		return o.hold(ctx, i, "publication_changed")
 	}
 	if protect != "" && protect != "reference_present" {
@@ -478,11 +508,24 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 		}
 		return o.settle(ctx, i, pubs, "missing_after_isolation", 0, 0, now)
 	}
+	if i.State == "reserved" && !absent {
+		return o.hold(ctx, i, "isolation_changed")
+	}
 	if absent && protect == "reference_present" {
+		if i.State == "moving" {
+			if current, err := source.Stamp(); err != nil || current != old {
+				return o.hold(ctx, i, "isolation_changed")
+			}
+		}
 		return o.settle(ctx, i, nil, "reference_restored", 0, 0, now)
 	}
 	if absent {
-		if ctx.Err() != nil {
+		if i.State == "reserved" {
+			if err := o.repo.OrphanPhase(ctx, i.ID, "moving", ""); err != nil {
+				return "ledger_error"
+			}
+		}
+		if o.interrupted("moving") || ctx.Err() != nil {
 			return "interrupted"
 		}
 		if err := source.Move(isolated, old); err != nil {
@@ -499,8 +542,11 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 	if !old.SameRenamed(quarantined) {
 		return o.hold(ctx, i, "isolation_changed")
 	}
-	if i.State == "isolated" && stampJSON(quarantined) != i.Isolated {
-		return o.hold(ctx, i, "isolation_changed")
+	if i.State == "isolated" {
+		var recorded diskcache.ObjectStamp
+		if json.Unmarshal([]byte(i.Isolated), &recorded) != nil || recorded != quarantined {
+			return o.hold(ctx, i, "isolation_changed")
+		}
 	}
 	if !verified {
 		*budget -= quarantined.Size
@@ -536,6 +582,16 @@ func (o *orphanManager) resume(ctx context.Context, r *OrphanReport, protect str
 		return "ledger_error"
 	}
 	return o.settle(ctx, i, pubs, "unlinked", quarantined.Size, quarantined.Blocks, now)
+}
+
+func (o *orphanManager) isolationAbsent(id string) bool {
+	isolated, err := o.tree.OpenIsolated(id, false)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	defer isolated.Close()
+	_, err = isolated.Stamp()
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func (o *orphanManager) hold(ctx context.Context, i cacheledger.OrphanIntent, reason string) string {
