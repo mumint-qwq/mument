@@ -168,7 +168,7 @@ func (s *Service) checkWarmupCache(ctx context.Context, plan *ledgerPreview) err
 			return ErrWarmupCached
 		}
 	}
-	return nil
+	return s.warmupCooldown(ctx, plan)
 }
 
 func estimateWarmup(ctx context.Context, file iteminfo.ExtendedFileInfo, input *warmupInput) (previewEstimate, error) {

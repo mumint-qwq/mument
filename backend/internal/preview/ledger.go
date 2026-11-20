@@ -275,6 +275,10 @@ func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledger
 		return previewResult{}, false, nil
 	}
 	if !found || !result.Matches(data) {
+		if s.space != nil && s.space.cfg.Mode == "enforce" &&
+			(s.space.tree == nil || s.space.tree.Check(false) != nil) {
+			return previewResult{}, false, nil
+		}
 		rejected, err := s.ledger.Reject(ctx, plan.ref, plan.variant, result)
 		if err != nil && ctx.Err() == nil {
 			logger.Warningf("cannot invalidate corrupt image preview: %v", err)

@@ -95,3 +95,41 @@ func TestSpaceForegroundHitAndUnstoredMiss(t *testing.T) {
 	require.Equal(t, uint64(1), f.s.space.snapshot().ForegroundUnstored)
 	require.Zero(t, f.s.space.snapshot().ReservedBytes)
 }
+
+func TestSpaceChangedRootAcrossRestartKeepsPublication(t *testing.T) {
+	f := startOrphanFixture(t)
+	require.NoError(t, f.s.Shutdown(t.Context()))
+	previous := settings.Config.Server.PreviewSpace
+	t.Cleanup(func() { settings.Config.Server.PreviewSpace = previous })
+	settings.Config.Server.PreviewSpace = settings.PreviewSpaceConfig{
+		Mode: "enforce", BudgetMiB: 4, MinimumFreeMiB: 1, ResumeFreeMiB: 2, StableSeconds: 1,
+	}
+	f.start(t)
+	require.Eventually(t, func() bool { return f.s.space.snapshot().Complete }, 5*time.Second, 25*time.Millisecond)
+	require.NoError(t, f.s.Shutdown(t.Context()))
+	root := filepath.Join(f.cache, "diskcache")
+	require.NoError(t, os.Rename(root, root+".saved"))
+	require.NoError(t, os.Mkdir(root, 0o700))
+	f.start(t)
+	require.ErrorContains(t, f.s.WarmupSpace(), "identity_changed")
+	require.Nil(t, f.s.space.tree)
+	original := filepath.Join(root+".saved", diskcache.RelativePath(f.key))
+	require.FileExists(t, original)
+	refBefore, found, err := f.s.ledger.Lookup(t.Context(), f.ref, f.variant)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	st, err := os.Stat(f.source)
+	require.NoError(t, err)
+	file := testFileInfoFromStatForReview(f.source, st)
+	file.Source = "orphan-test"
+	data, err := f.s.getPreviewForFile(t.Context(), file, "small", "", 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, data)
+	refAfter, found, err := f.s.ledger.Lookup(t.Context(), f.ref, f.variant)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, refBefore, refAfter)
+	require.NoFileExists(t, f.physical)
+	require.FileExists(t, original)
+}

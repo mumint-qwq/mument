@@ -6,6 +6,9 @@ import "context"
 
 type Inventory struct{}
 
+func (*ReclaimTree) RecordedRoot() (DirectoryIdentity, error) {
+	return DirectoryIdentity{}, ErrReclaimScope
+}
 func (*ReclaimTree) SpaceSample() (SpaceSample, error)           { return SpaceSample{}, ErrReclaimScope }
 func (*ReclaimTree) NewInventory() (*Inventory, error)           { return nil, ErrReclaimScope }
 func (*ReclaimTree) Store(context.Context, string, []byte) error { return ErrReclaimScope }

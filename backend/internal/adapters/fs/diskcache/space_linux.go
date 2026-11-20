@@ -17,6 +17,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func (t *ReclaimTree) RecordedRoot() (DirectoryIdentity, error) {
+	if err := t.CheckRecordedRoot(t.identity.DirectoryIdentity); err != nil {
+		return DirectoryIdentity{}, err
+	}
+	return t.identity.DirectoryIdentity, nil
+}
+
 func (t *ReclaimTree) SpaceSample() (SpaceSample, error) {
 	if err := t.Check(false); err != nil {
 		return SpaceSample{}, err
@@ -211,7 +218,10 @@ func (t *ReclaimTree) Store(ctx context.Context, key string, value []byte) error
 		return err
 	}
 	defer unix.Unlinkat(parent, name, 0)
-	if err := writeCacheValue(ctx, os.NewFile(uintptr(fd), "cache write"), value); err != nil {
+	if err := writeCacheValue(os.NewFile(uintptr(fd), "cache write"), value); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	obj := &CacheObject{tree: t, dir: parent, parent: filepath.Dir(path), leaf: leaf}

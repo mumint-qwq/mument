@@ -219,11 +219,14 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 			spaceTree = next.orphans.tree
 		}
 		next.space = newSpaceManager(spaceTree, spaceConfig)
+		next.space.bind(next.ledger)
 		go next.space.run(next.baseCtx)
 		if next.orphans != nil {
 			next.orphans.onUnlink = next.space.invalidateInventory
-			next.capacity = newCapacityManager(next.orphans, next.space)
-			go next.capacity.run(next.baseCtx)
+			if next.space.tree != nil {
+				next.capacity = newCapacityManager(next.orphans, next.space)
+				go next.capacity.run(next.baseCtx)
+			}
 		}
 	}
 	if next.orphans != nil {

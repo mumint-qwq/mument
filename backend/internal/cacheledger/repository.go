@@ -90,7 +90,7 @@ func Open(path string) (*Repository, error) {
 	if err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	if _, err = tx.Exec(schema + orphanSchema + capacitySchema); err != nil {
+	if _, err = tx.Exec(schema + orphanSchema + capacitySchema + capacityCooldownSchema); err != nil {
 		return nil, errors.Join(err, tx.Rollback(), db.Close())
 	}
 	if err = initOrphanIntents(tx); err != nil {
@@ -253,6 +253,11 @@ func (r *Repository) PublishScoped(ctx context.Context, ref Ref, variant, key st
 	if stamp != "" {
 		epoch := newID()
 		if _, err := tx.ExecContext(ctx, "INSERT INTO orphan_publications VALUES(?,?,?,?,?)", ref.Asset, variant, epoch, published.GeneratedAt, stamp); err != nil {
+			return Result{}, err
+		}
+		// A committed replacement under the physical key gate ends the
+		// cooldown for this exact asset and variant, even with no source proof.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM capacity_cooldown WHERE asset=? AND variant=?", ref.Asset, variant); err != nil {
 			return Result{}, err
 		}
 		if proof != "" {

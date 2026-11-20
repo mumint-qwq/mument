@@ -118,7 +118,7 @@ func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	if err := writeCacheValue(ctx, tmp, value); err != nil {
+	if err := writeCacheValue(tmp, value); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
@@ -129,7 +129,7 @@ func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 	return nil
 }
 
-func writeCacheValue(ctx context.Context, tmp *os.File, value []byte) (err error) {
+func writeCacheValue(tmp *os.File, value []byte) (err error) {
 	defer func() { err = errors.Join(err, tmp.Close()) }()
 	if _, err := tmp.Write(value); err != nil {
 		return err
@@ -140,7 +140,44 @@ func writeCacheValue(ctx context.Context, tmp *os.File, value []byte) (err error
 	if err := tmp.Chmod(fileutils.PermFile); err != nil {
 		return err
 	}
-	return ctx.Err()
+	return nil
+}
+
+// StoreAt shares the ordinary physical key lock with legacy deletions.
+func (f *FileCache) StoreAt(ctx context.Context, tree *ReclaimTree, key string, value []byte) error {
+	mu := f.keyLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+	return tree.Store(ctx, key, value)
+}
+
+// DeleteAt protects the cache root during ordinary legacy key removal.
+func (f *FileCache) DeleteAt(ctx context.Context, tree *ReclaimTree, key string) (bool, error) {
+	mu := f.keyLock(key)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := tree.Check(true); err != nil {
+		return false, err
+	}
+	obj, err := tree.OpenKey(key)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer obj.Close()
+	stamp, err := obj.Stamp()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, obj.Unlink(stamp)
 }
 
 // HasSized checks the ledger's physical result without loading thumbnail bytes.

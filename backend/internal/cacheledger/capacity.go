@@ -26,7 +26,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS capacity_intents_publication ON capacity_inten
 CREATE TABLE IF NOT EXISTS capacity_audit (
  id TEXT PRIMARY KEY, object_id TEXT NOT NULL, reason TEXT NOT NULL, logical INTEGER NOT NULL, blocks INTEGER NOT NULL, finished INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS capacity_clock (id INTEGER PRIMARY KEY CHECK(id=1), last INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS capacity_cache_root (id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL);
 `
+
+// BindPreviewSpaceRoot pins a durable cache root across service lifetimes.
+func (r *Repository) BindPreviewSpaceRoot(ctx context.Context, identity string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO capacity_cache_root VALUES(1,?)", identity); err != nil {
+		return err
+	}
+	var expected string
+	if err := tx.QueryRowContext(ctx, "SELECT identity FROM capacity_cache_root WHERE id=1").Scan(&expected); err != nil {
+		return err
+	}
+	if expected != identity {
+		return ErrStale
+	}
+	return tx.Commit()
+}
 
 const CapacityNewProtection = time.Hour
 const CapacityUseProtection = 7 * 24 * time.Hour
@@ -42,13 +63,16 @@ type CapacityCandidate struct {
 	Cursor CapacityCursor
 }
 
-func (r *Repository) CapacityCandidates(ctx context.Context, after CapacityCursor, now time.Time) ([]CapacityCandidate, error) {
-	query := `SELECT storage_key,generated,scan_id FROM capacity_entries
+const capacityUnusedPage = `SELECT storage_key,generated,scan_id FROM capacity_entries
  WHERE used=0 AND (generated,scan_id)>(?,?) AND generated<=? ORDER BY generated,scan_id LIMIT ?`
+const capacityUsedPage = `SELECT storage_key,used,scan_id FROM capacity_entries
+ WHERE used>0 AND (used,scan_id)>(?,?) AND used<=? ORDER BY used,scan_id LIMIT ?`
+
+func (r *Repository) CapacityCandidates(ctx context.Context, after CapacityCursor, now time.Time) ([]CapacityCandidate, error) {
+	query := capacityUnusedPage
 	cutoff := now.Add(-CapacityNewProtection)
 	if after.Used {
-		query = `SELECT storage_key,used,scan_id FROM capacity_entries
- WHERE used>0 AND (used,scan_id)>(?,?) AND used<=? ORDER BY used,scan_id LIMIT ?`
+		query = capacityUsedPage
 		cutoff = now.Add(-CapacityUseProtection)
 	}
 	rows, err := r.db.QueryContext(ctx, query, after.Time, after.Row, cutoff.UnixNano(), OrphanPageSize)
@@ -113,7 +137,28 @@ func (r *Repository) SettleCapacity(ctx context.Context, i OrphanIntent, pubs []
 	}
 	defer tx.Rollback()
 	for _, p := range pubs {
-		if _, err := removeExactPublication(ctx, tx, i.Key, p); err != nil {
+		var proof string
+		var source struct{ Source string }
+		err := tx.QueryRowContext(ctx, "SELECT proof FROM capacity_entries WHERE asset=? AND variant=? AND epoch=?",
+			p.Asset, p.Variant, p.Epoch).Scan(&proof)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		result, err := removeExactPublication(ctx, tx, i.Key, p)
+		if err != nil {
+			return err
+		}
+		removed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if removed == 0 || json.Unmarshal([]byte(proof), &source) != nil || source.Source == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO capacity_cooldown(asset,variant,epoch,source,proof,since,eligible,reason)
+ VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(asset,variant) DO UPDATE SET epoch=excluded.epoch,source=excluded.source,proof=excluded.proof,
+ since=excluded.since,eligible=excluded.eligible,reason=excluded.reason`,
+			p.Asset, p.Variant, p.Epoch, source.Source, proof, now.UnixNano(), now.Add(CapacityCooldown).UnixNano(), reason); err != nil {
 			return err
 		}
 	}
@@ -129,6 +174,33 @@ func (r *Repository) AdvanceCapacityClock(ctx context.Context, now time.Time) er
 
 func (r *Repository) CapacityAudit(ctx context.Context) ([]OrphanAudit, error) {
 	return r.reclaimAudit(ctx, "capacity_audit")
+}
+
+func (r *Repository) CapacityAuditPage(ctx context.Context, before int64) ([]OrphanAudit, int64, error) {
+	query := `SELECT rowid,id,object_id,reason,logical,blocks,finished FROM capacity_audit`
+	args := []any{OrphanPageSize}
+	if before > 0 {
+		query += " WHERE rowid<?"
+		args = []any{before, OrphanPageSize}
+	}
+	rows, err := r.db.QueryContext(ctx, query+" ORDER BY rowid DESC LIMIT ?", args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var last int64
+	var audit []OrphanAudit
+	for rows.Next() {
+		var event OrphanAudit
+		if err := rows.Scan(&last, &event.ID, &event.ObjectID, &event.Reason, &event.Logical, &event.Blocks, &event.Finished); err != nil {
+			return nil, 0, err
+		}
+		audit = append(audit, event)
+	}
+	if len(audit) < OrphanPageSize {
+		last = 0
+	}
+	return audit, last, rows.Err()
 }
 
 func removeExactPublication(ctx context.Context, tx *sql.Tx, key string, p OrphanPublication) (sql.Result, error) {

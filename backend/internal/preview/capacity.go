@@ -55,6 +55,7 @@ func (p capacitySourceProof) matches(ref cacheledger.Ref) bool {
 type CapacityCursor struct {
 	Candidate cacheledger.CapacityCursor `json:"candidate"`
 	Intent    int64                      `json:"intent"`
+	Audit     int64                      `json:"audit"`
 }
 
 type CapacityReport struct {
@@ -72,6 +73,7 @@ type capacityManager struct {
 	done           chan struct{}
 	active         [64]atomic.Int32
 	uncertainUsage [64]atomic.Int64
+	cooldownSkips  atomic.Uint64
 	paused         atomic.Bool
 	last           atomic.Pointer[CapacityReport]
 	priority       atomic.Pointer[string]
@@ -179,29 +181,34 @@ func (m *capacityManager) run(ctx context.Context) {
 			if m.space.cfg.Mode != "enforce" {
 				return
 			}
-			pressure := m.space.needsCapacity()
-			if !pressure && m.space.snapshot().State == "healthy" {
-				orphanOffered = false
-			}
-			if pressure && !orphanOffered {
-				if m.orphan.enabled && !m.orphan.executeWindow(ctx) {
-					continue
-				}
-				priority := "disabled"
-				if m.orphan.enabled {
-					priority = "offered"
-				}
-				m.priority.Store(&priority)
-				orphanOffered = true
-				m.space.poll(m.space.now())
-				continue
-			}
-			if m.space.cfg.CapacityEviction && !m.paused.Load() {
-				report := m.report(ctx, cursor, true)
-				cursor = report.Next
-				m.last.Store(&report)
-			}
+			m.step(ctx, &cursor, &orphanOffered)
 		}
+	}
+}
+
+func (m *capacityManager) step(ctx context.Context, cursor *CapacityCursor, orphanOffered *bool) {
+	pressure := m.space.needsCapacity()
+	if !pressure && m.space.snapshot().State == "healthy" {
+		*orphanOffered = false
+		m.priority.Store(nil)
+	}
+	if pressure && !*orphanOffered {
+		if m.orphan.enabled && !m.orphan.executeWindow(ctx) {
+			return
+		}
+		priority := "disabled"
+		if m.orphan.enabled {
+			priority = "offered"
+		}
+		m.priority.Store(&priority)
+		*orphanOffered = true
+		m.space.poll(m.space.now())
+		return
+	}
+	if m.space.cfg.CapacityEviction && !m.paused.Load() {
+		report := m.report(ctx, *cursor, true)
+		*cursor = report.Next
+		m.last.Store(&report)
 	}
 }
 
@@ -278,7 +285,7 @@ func (m *capacityManager) report(parent context.Context, cursor CapacityCursor, 
 		r.Next.Candidate.Used = true
 	}
 	if !apply {
-		r.RecentRemoval, _ = m.orphan.repo.CapacityAudit(ctx)
+		r.RecentRemoval, r.Next.Audit, _ = m.orphan.repo.CapacityAuditPage(ctx, cursor.Audit)
 	}
 	return r
 }

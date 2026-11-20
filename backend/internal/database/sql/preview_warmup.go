@@ -102,3 +102,13 @@ func (db *IndexDB) MarkPreviewWarmup(ctx context.Context, source string, c Previ
 		c.Guard, attempts, retryAt, source, c.Path, c.Guard, c.Version)
 	return err
 }
+
+// PreviewWarmupExact includes completed guards for the bounded cooldown lane.
+func (db *IndexDB) PreviewWarmupExact(ctx context.Context, source, path string) (PreviewWarmupCandidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	var c PreviewWarmupCandidate
+	err := db.DB().QueryRowContext(ctx, warmupFields+`FROM index_items WHERE source=? AND path=? AND `+warmupRaster, source, path).
+		Scan(&c.Path, &c.Type, &c.Version, &c.Guard, &c.MTimeNS, &c.Attempts, &c.RetryAt)
+	return c, err
+}

@@ -16,7 +16,7 @@ func previewSpaceGet(w http.ResponseWriter, r *http.Request, _ *Context) (int, e
 func previewCapacityGet(w http.ResponseWriter, r *http.Request, _ *Context) (int, error) {
 	q := r.URL.Query()
 	cursor := preview.CapacityCursor{}
-	for key, field := range map[string]*int64{"time": &cursor.Candidate.Time, "row": &cursor.Candidate.Row, "intent": &cursor.Intent} {
+	for key, field := range map[string]*int64{"time": &cursor.Candidate.Time, "row": &cursor.Candidate.Row, "intent": &cursor.Intent, "audit": &cursor.Audit} {
 		if value := q.Get(key); value != "" {
 			n, err := strconv.ParseInt(value, 10, 64)
 			if err != nil || n < 0 {

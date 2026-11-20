@@ -2,12 +2,14 @@ package preview
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"sync"
 	"time"
 
 	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
 )
 
@@ -50,6 +52,7 @@ type SpaceStatus struct {
 	DEnabled           bool                  `json:"warmup_enabled"`
 	E2Enabled          bool                  `json:"orphan_reclamation_enabled"`
 	E3Enabled          bool                  `json:"capacity_eviction_enabled"`
+	CooldownSkips      uint64                `json:"cooldown_skips"`
 	CapacityPaused     bool                  `json:"capacity_paused"`
 	LastCapacity       *CapacityReport       `json:"last_capacity,omitempty"`
 	OrphanFirst        string                `json:"orphan_first,omitempty"`
@@ -57,10 +60,11 @@ type SpaceStatus struct {
 }
 
 type spaceManager struct {
-	tree *diskcache.ReclaimTree
-	cfg  settings.PreviewSpaceConfig
-	done chan struct{}
-	now  func() time.Time
+	tree    *diskcache.ReclaimTree
+	cfg     settings.PreviewSpaceConfig
+	done    chan struct{}
+	now     func() time.Time
+	bindErr error
 
 	mu               sync.Mutex
 	status           SpaceStatus
@@ -82,6 +86,29 @@ func newSpaceManager(tree *diskcache.ReclaimTree, cfg settings.PreviewSpaceConfi
 	}
 }
 
+func (m *spaceManager) bind(repo *cacheledger.Repository) {
+	if m.tree == nil || m.cfg.Mode != "enforce" {
+		return
+	}
+	// Use the leased inode even when current statfs is unavailable. A
+	// transient read failure must never bypass comparison of an old root.
+	root, err := m.tree.RecordedRoot()
+	if err == nil {
+		identity, _ := json.Marshal(root)
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		err = repo.BindPreviewSpaceRoot(ctx, string(identity))
+		if errors.Is(err, cacheledger.ErrStale) {
+			err = diskcache.ErrReclaimIdentity
+		}
+	}
+	if err != nil {
+		m.bindErr = err
+		m.tree = nil
+		m.status.Reason = diskcache.ReclaimReason(err)
+	}
+}
+
 func (m *spaceManager) snapshot() SpaceStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -93,6 +120,7 @@ func PreviewSpaceStatus() SpaceStatus {
 	if s := service; s != nil && s.space != nil {
 		result = s.space.snapshot()
 		if s.capacity != nil {
+			result.CooldownSkips = s.capacity.cooldownSkips.Load()
 			result.CapacityPaused = s.capacity.paused.Load()
 			result.LastCapacity = s.capacity.last.Load()
 			if priority := s.capacity.priority.Load(); priority != nil {
@@ -125,7 +153,9 @@ func (s *Service) WarmupSpace() error {
 func (m *spaceManager) poll(now time.Time) {
 	var sample diskcache.SpaceSample
 	var err error
-	if m.tree == nil {
+	if m.bindErr != nil {
+		err = m.bindErr
+	} else if m.tree == nil {
 		err = diskcache.ErrReclaimScope
 	} else {
 		sample, err = m.tree.SpaceSample()
@@ -363,7 +393,7 @@ func (m *spaceManager) finish(res spaceReservation, payload int64, allocated int
 		s.Usage.Allocated = saturatingAdd(s.Usage.Allocated, allocated)
 		s.Usage.Logical = saturatingAdd(s.Usage.Logical, payload)
 		s.UsageAdjusted = true
-	} else if reason := diskcache.SpaceWriteReason(err); reason != "" {
+	} else if reason := spaceStoreReason(err); reason != "" {
 		m.writeError = reason
 		s.Complete = false
 		s.InventoryReason = reason
@@ -378,14 +408,14 @@ func (m *spaceManager) needsCapacity() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := &m.status
-	if s.State != "pressured" || !s.Complete || s.Filesystem.ReadOnly || m.fsReason != "" || m.writeError != "" {
+	if s.State != "pressured" || !s.Complete || s.ReservedBytes != 0 || s.Filesystem.ReadOnly || m.fsReason != "" || m.writeError != "" {
 		return false
 	}
 	switch m.pressureCause {
 	case "low_free", "low_inodes":
 		return true
 	case "high_usage":
-		if s.UsageAdjusted || s.ReservedBytes != 0 {
+		if s.UsageAdjusted {
 			m.requestInventory()
 			return false
 		}
@@ -431,6 +461,12 @@ func (s *Service) storePreview(ctx context.Context, key string, bytes []byte, ba
 		return s.fileCache.Store(ctx, key, bytes)
 	}
 	if m.tree == nil {
+		return &SpaceDeferred{m.snapshot().Reason}
+	}
+	cache, ok := s.fileCache.(interface {
+		StoreAt(context.Context, *diskcache.ReclaimTree, string, []byte) error
+	})
+	if !ok {
 		return &SpaceDeferred{"scope_unavailable"}
 	}
 	sample, err := m.tree.SpaceSample()
@@ -448,7 +484,7 @@ func (s *Service) storePreview(ctx context.Context, key string, bytes []byte, ba
 	if err != nil {
 		return err
 	}
-	err = m.tree.Store(ctx, key, bytes)
+	err = cache.StoreAt(ctx, m.tree, key, bytes)
 	allocated := reservation.bytes - 2*sample.Block
 	if err == nil {
 		if object, err := m.tree.OpenKey(key); err == nil {
@@ -459,16 +495,41 @@ func (s *Service) storePreview(ctx context.Context, key string, bytes []byte, ba
 		}
 	}
 	m.finish(reservation, int64(len(bytes)), allocated, err)
-	if reason := diskcache.SpaceWriteReason(err); reason != "" {
+	if reason := spaceStoreReason(err); reason != "" {
 		return &SpaceDeferred{reason}
 	}
 	return err
 }
 
+func spaceStoreReason(err error) string {
+	if reason := diskcache.SpaceWriteReason(err); reason != "" {
+		return reason
+	}
+	switch {
+	case errors.Is(err, diskcache.ErrReclaimIdentity), errors.Is(err, diskcache.ErrReclaimScope),
+		errors.Is(err, diskcache.ErrDurableIdentity), errors.Is(err, diskcache.ErrReclaimLinks):
+		return diskcache.ReclaimReason(err)
+	default:
+		return ""
+	}
+}
+
 func (s *Service) deletePreviewCache(ctx context.Context, key string) error {
+	m := s.space
+	if m != nil && m.cfg.Mode == "enforce" {
+		cache, ok := s.fileCache.(*diskcache.FileCache)
+		if !ok || m.tree == nil {
+			return diskcache.ErrReclaimScope
+		}
+		removed, err := cache.DeleteAt(ctx, m.tree, key)
+		if removed {
+			m.invalidateInventory()
+		}
+		return err
+	}
 	err := s.fileCache.Delete(ctx, key)
-	if err == nil && s.space != nil {
-		s.space.invalidateInventory()
+	if err == nil && m != nil {
+		m.invalidateInventory()
 	}
 	return err
 }
