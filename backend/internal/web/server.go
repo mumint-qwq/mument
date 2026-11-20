@@ -34,6 +34,7 @@ type Deps struct {
 	Files         *files.Service
 	Auth          *auth.Service
 	PreviewWarmup *previewwarmup.Worker
+	PreviewReuse  *previewwarmup.ReuseWorker
 }
 
 var (
