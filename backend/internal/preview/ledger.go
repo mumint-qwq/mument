@@ -232,6 +232,11 @@ func (s *Service) planLedgerPreviewWithStat(ctx context.Context, file iteminfo.E
 }
 
 func (s *Service) loadPreviewCache(ctx context.Context, key string, plan *ledgerPreview) (previewResult, bool, error) {
+	unlock, err := s.orphans.lockKey(ctx, key)
+	if err != nil {
+		return previewResult{}, false, err
+	}
+	defer unlock()
 	if plan == nil {
 		data, found, err := s.loadCached(ctx, key)
 		return previewResult{data: data}, found, err
@@ -292,6 +297,11 @@ func (e *previewSourceCheckError) Error() string { return e.cause.Error() }
 func (e *previewSourceCheckError) Unwrap() error { return e.cause }
 
 func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool, warmup *warmupInput) (cacheledger.Result, error) {
+	unlock, err := s.orphans.lockKey(ctx, key)
+	if err != nil {
+		return cacheledger.Result{}, err
+	}
+	defer unlock()
 	if plan == nil {
 		return cacheledger.Result{}, s.fileCache.Store(ctx, key, data)
 	}
@@ -315,7 +325,7 @@ func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *led
 			return cacheledger.Result{}, &previewSourceCheckError{cause: ErrPreviewSourceChanged}
 		}
 	}
-	return s.ledger.Publish(ctx, plan.ref, plan.variant, key, data)
+	return s.ledger.PublishObserved(ctx, plan.ref, plan.variant, key, data, s.orphans.publicationStamp(key))
 }
 
 func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, result previewResult, foreground bool) ([]byte, error) {

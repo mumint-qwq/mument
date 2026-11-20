@@ -119,6 +119,7 @@ func configureHTTPRouter(router, api, publicRoutes, publicApi *http.ServeMux) {
 	// Settings Routes - /api/settings/
 	// ========================================
 	api.HandleFunc("GET /settings", withAdmin(settingsGetHandler))
+	api.HandleFunc("GET /settings/preview-orphans", withAdmin(previewOrphansGet))
 	api.HandleFunc("GET /settings/preview-warmup", withAdmin(previewWarmupGet))
 	api.HandleFunc("POST /settings/preview-warmup", withAdmin(previewWarmupPost))
 	api.HandleFunc("GET /settings/config", withAdmin(settingsConfigHandler))

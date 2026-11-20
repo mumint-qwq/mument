@@ -47,6 +47,7 @@ var (
 type Service struct {
 	fileCache      diskcache.Interface
 	ledger         *cacheledger.Repository
+	orphans        *orphanManager
 	recoveryDone   chan struct{}
 	ledgerClose    sync.Once
 	ledgerCloseErr error
@@ -168,11 +169,44 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 	if service != nil {
 		logger.Errorf("WARNING: StartPreviewGenerator called multiple times! Shutting down the previous preview service.")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = service.Shutdown(shutdownCtx)
+		err := service.Shutdown(shutdownCtx)
 		cancel()
+		if err != nil {
+			return err
+		}
 	}
-	service = NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB, cacheDir)
-	service.startLedger()
+	if cacheDir == "" {
+		cacheDir = os.TempDir()
+	}
+	// Prepare only the dedicated directory before taking the writer lease.
+	// Cache initialization may migrate old keys and runs after acquisition.
+	enabled := settings.Config.Server.PreviewOrphanReclamation
+	if err := os.MkdirAll(filepath.Join(cacheDir, "diskcache"), fileutils.PermDir); err != nil {
+		return err
+	}
+	tree, err := diskcache.OpenReclaimTree(cacheDir)
+	if err != nil && (enabled || errors.Is(err, diskcache.ErrReclaimBusy)) {
+		return err
+	}
+	if enabled {
+		if err := tree.Check(true); err != nil {
+			_ = tree.Close()
+			return err
+		}
+	}
+	next := NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB, cacheDir)
+	next.startLedger()
+	if tree != nil && next.ledger != nil {
+		next.orphans = newOrphanManager(tree, next.ledger, enabled, settings.Config.Server.PreviewOrphanGraceHours)
+		go next.orphans.run(next.baseCtx)
+	} else if tree != nil {
+		_ = tree.Close()
+	}
+	if enabled && next.orphans == nil {
+		_ = next.Shutdown(context.Background())
+		return ErrPreviewUnavailable
+	}
+	service = next
 	return nil
 }
 
@@ -210,9 +244,19 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	if s.orphans != nil {
+		select {
+		case <-s.orphans.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	s.ledgerClose.Do(func() {
 		if s.ledger != nil {
 			s.ledgerCloseErr = s.ledger.Close()
+		}
+		if s.orphans != nil {
+			s.ledgerCloseErr = errors.Join(s.ledgerCloseErr, s.orphans.tree.Close())
 		}
 	})
 	return s.ledgerCloseErr
@@ -1057,9 +1101,21 @@ func DelThumbs(ctx context.Context, file iteminfo.ExtendedFileInfo) {
 	_, _ = hasher.Write([]byte(cacheString))
 	cacheHash := hex.EncodeToString(hasher.Sum(nil))
 
-	errSmall := service.fileCache.Delete(ctx, CacheKey(cacheHash, "small", 0))
+	small := CacheKey(cacheHash, "small", 0)
+	unlock, err := service.orphans.lockKey(ctx, small)
+	if err != nil {
+		return
+	}
+	errSmall := service.fileCache.Delete(ctx, small)
+	unlock()
 	if errSmall != nil {
-		errLarge := service.fileCache.Delete(ctx, CacheKey(cacheHash, "large", 0))
+		large := CacheKey(cacheHash, "large", 0)
+		unlock, err := service.orphans.lockKey(ctx, large)
+		if err != nil {
+			return
+		}
+		errLarge := service.fileCache.Delete(ctx, large)
+		unlock()
 		if errLarge != nil {
 			logger.Debugf("Could not delete thumbnail: %v", file.Name)
 		}

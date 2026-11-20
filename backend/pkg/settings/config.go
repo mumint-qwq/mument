@@ -66,6 +66,12 @@ func initializeConfig(configFile string, cliMode bool) {
 		time.Sleep(5 * time.Second) // allow sleep time before exiting to give docker/kubernetes time before restarting
 		logger.Fatal(err.Error())
 	}
+	if Config.Server.PreviewOrphanReclamation && (Config.Server.CacheDirCleanup || Config.Server.CacheDir == "") {
+		logger.Fatal("previewOrphanReclamation requires an explicit persistent cacheDir with cacheDirCleanup disabled")
+	}
+	if hours := Config.Server.PreviewOrphanGraceHours; hours != 0 && (hours < 24 || hours > 8760) {
+		logger.Fatal("previewOrphanGraceHours must be between 24 and 8760")
+	}
 	setupFs()
 	setupServer()
 	setupHttp()

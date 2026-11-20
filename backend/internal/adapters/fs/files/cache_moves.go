@@ -30,6 +30,8 @@ type observedMove struct {
 	copy             bool
 	directoryVersion cacheledger.Version
 	outcome          cacheledger.RenameOutcome
+	targetMutation   *preview.OrphanMutation
+	targetReplaced   bool
 }
 
 // MoveResourcesBatched takes a bounded group of independently authorized moves.
@@ -117,6 +119,11 @@ func (s *Service) renameResources(moves []ResourceMove, observations []observedM
 		} else {
 			obs.info = nil
 		}
+		if repo != nil && obs.info != nil && !m.Directory {
+			if target, targetErr := os.Lstat(m.To); targetErr == nil && target.Mode().IsRegular() {
+				obs.targetMutation = preview.BeginOrphanMutation(ctx, repo, m.Target, obs.dst.Path, m.To, "replace_target")
+			}
+		}
 		started := time.Now()
 		err = os.Rename(m.From, m.To)
 		if repo != nil {
@@ -141,6 +148,7 @@ func (s *Service) renameResources(moves []ResourceMove, observations []observedM
 				if cacheledger.FromFileInfo(obs.info).RenameCompatible(version) {
 					obs.after = after
 					obs.outcome.After = version
+					obs.targetReplaced = obs.targetMutation.ProvesUnlinked(true)
 				}
 			}
 		}
@@ -149,9 +157,13 @@ func (s *Service) renameResources(moves []ResourceMove, observations []observedM
 		}
 	}
 	if repo != nil {
-		if err := repo.CompleteRenames(ctx, outcomes); err != nil {
-			logger.Warningf("filesystem move completed with uncommitted preview ledger intents: %v", err)
+		moveErr := repo.CompleteRenames(ctx, outcomes)
+		if moveErr != nil {
+			logger.Warningf("filesystem move completed with uncommitted preview ledger intents: %v", moveErr)
 			repo.RequestRecovery()
+		}
+		for _, obs := range observations {
+			obs.targetMutation.Finish(ctx, obs.targetReplaced && moveErr == nil, obs.outcome.ID)
 		}
 		// Finish B transfer before another application rename acquires the location
 		// lock. It checks the current target and executes only keyed SQL statements.
