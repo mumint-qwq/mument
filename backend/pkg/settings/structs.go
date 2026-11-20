@@ -89,6 +89,7 @@ type Server struct {
 	NameToSource map[string]*Source `json:"-" validate:"omitempty"` // uses name as key
 	DatabaseV2   Database           `json:"database"`               // SQLite database configuration
 
+	PreviewReuse             PreviewWarmupConfig `json:"previewReuse,omitempty"`
 	PreviewWarmup            PreviewWarmupConfig `json:"previewWarmup,omitempty"`
 	PreviewSpace             PreviewSpaceConfig  `json:"previewSpace,omitempty"`
 	PreviewOrphanGraceHours  int                 `json:"previewOrphanGraceHours,omitempty"`  // Grace for newly confirmed orphans, default 168 hours
