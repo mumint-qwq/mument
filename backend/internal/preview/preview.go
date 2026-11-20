@@ -48,6 +48,7 @@ type Service struct {
 	fileCache      diskcache.Interface
 	ledger         *cacheledger.Repository
 	orphans        *orphanManager
+	space          *spaceManager
 	recoveryDone   chan struct{}
 	ledgerClose    sync.Once
 	ledgerCloseErr error
@@ -93,6 +94,10 @@ func NewPreviewGenerator(concurrencyLimit int, cacheDir string) *Service {
 // budget is shared by every preview task. There is no second independent
 // four-task or eight-megabyte semaphore.
 func NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cacheDir string) *Service {
+	return newPreviewGenerator(concurrencyLimit, memoryBudgetMB, cacheDir, false)
+}
+
+func newPreviewGenerator(concurrencyLimit, memoryBudgetMB int, cacheDir string, spaceConfigured bool) *Service {
 	configureImagingParallelism()
 
 	if concurrencyLimit < 1 {
@@ -107,10 +112,11 @@ func NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cacheDi
 		actualCacheDir = os.TempDir()
 	}
 
-	var fileCache diskcache.Interface
-	// Use file cache if cacheDir is specified
-	var err error
-	fileCache, err = diskcache.NewFileCache(actualCacheDir)
+	openCache := diskcache.NewFileCache
+	if spaceConfigured {
+		openCache = diskcache.NewRetainedFileCache
+	}
+	fileCache, err := openCache(actualCacheDir)
 	if err != nil {
 		logger.Error("The cache dir could not be created. Make sure the user that you executed the program with has access to create directories in the local path. See  ")
 		logger.Fatalf("failed to create file cache path, which is now require to run the server: %v", err)
@@ -194,7 +200,8 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 			return err
 		}
 	}
-	next := NewPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB, cacheDir)
+	spaceConfig := settings.Config.Server.PreviewSpace
+	next := newPreviewGenerator(concurrencyLimit, memoryBudgetMB, cacheDir, spaceConfig.Mode != "")
 	next.startLedger()
 	if tree != nil && next.ledger != nil {
 		next.orphans = newOrphanManager(tree, next.ledger, enabled, settings.Config.Server.PreviewOrphanGraceHours)
@@ -205,6 +212,14 @@ func StartPreviewGeneratorWithBudget(concurrencyLimit, memoryBudgetMB int, cache
 	if enabled && next.orphans == nil {
 		_ = next.Shutdown(context.Background())
 		return ErrPreviewUnavailable
+	}
+	if spaceConfig.Mode != "" {
+		var spaceTree *diskcache.ReclaimTree
+		if next.orphans != nil {
+			spaceTree = next.orphans.tree
+		}
+		next.space = newSpaceManager(spaceTree, spaceConfig)
+		go next.space.run(next.baseCtx)
 	}
 	service = next
 	return nil
@@ -240,6 +255,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if s.recoveryDone != nil {
 		select {
 		case <-s.recoveryDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if s.space != nil {
+		select {
+		case <-s.space.done:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -293,6 +315,7 @@ func WarmPreviewForFile(ctx context.Context, file iteminfo.ExtendedFileInfo, pre
 }
 
 type previewResult struct {
+	spaceErr error
 	data     []byte
 	ready    cacheledger.Result
 	weakInfo os.FileInfo
@@ -352,7 +375,7 @@ func (s *Service) requestInteractivePreview(ctx context.Context, file iteminfo.E
 			s.stats.cacheHits.Add(1)
 			return result, nil
 		}
-		return s.generateAndPublish(taskCtx, file, previewSize, url, seekPercentage, cacheHash, cacheKey, markStarted, publication, nil)
+		return s.generateAndPublish(taskCtx, file, previewSize, url, seekPercentage, cacheHash, cacheKey, markStarted, publication, nil, !foreground)
 	})
 	if err != nil {
 		return nil, err
@@ -382,7 +405,7 @@ func (s *Service) loadCached(ctx context.Context, cacheKey string) ([]byte, bool
 // generateAndPublish is the only path that opens the source for preview work.
 // It reserves memory, verifies the source version, generates, verifies again,
 // and atomically publishes the result.
-func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int, fileMD5, cacheKey string, markStarted func() bool, publication *ledgerPreview, warmup *warmupInput) (previewResult, error) {
+func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.ExtendedFileInfo, previewSize, officeUrl string, seekPercentage int, fileMD5, cacheKey string, markStarted func() bool, publication *ledgerPreview, warmup *warmupInput, background bool) (previewResult, error) {
 	if fileMD5 == "" {
 		return previewResult{}, fmt.Errorf("preview cache hash is empty")
 	}
@@ -550,7 +573,7 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	}
 
 	publishStart := time.Now()
-	ready, err := s.publishPreviewCache(ctx, cacheKey, publication, data, original, warmup)
+	ready, err := s.publishPreviewCache(ctx, cacheKey, publication, data, original, warmup, background)
 	var sourceCheck *previewSourceCheckError
 	if errors.As(err, &sourceCheck) {
 		if errors.Is(sourceCheck, ErrPreviewSourceChanged) {
@@ -571,6 +594,9 @@ func (s *Service) generateAndPublish(ctx context.Context, file iteminfo.Extended
 	s.stats.publishNanos.Add(uint64(time.Since(publishStart).Nanoseconds()))
 	s.stats.generateNanos.Add(uint64(time.Since(start).Nanoseconds()))
 	result := previewResult{data: data, ready: ready}
+	if IsSpaceDeferred(err) {
+		result.spaceErr = err
+	}
 	if publication != nil && publication.weakInfo != nil {
 		result.weakInfo = after
 	}
@@ -1000,7 +1026,7 @@ func GeneratePreviewWithMD5(ctx context.Context, file iteminfo.ExtendedFileInfo,
 		return nil, ErrPreviewSaturated
 	}
 	defer service.tasks.release()
-	result, err := service.generateAndPublish(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, CacheKey(fileMD5, previewSize, seekPercentage), nil, nil, nil)
+	result, err := service.generateAndPublish(ctx, file, previewSize, officeUrl, seekPercentage, fileMD5, CacheKey(fileMD5, previewSize, seekPercentage), nil, nil, nil, false)
 	return result.data, err
 }
 

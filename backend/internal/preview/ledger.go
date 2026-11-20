@@ -296,19 +296,19 @@ type previewSourceCheckError struct{ cause error }
 func (e *previewSourceCheckError) Error() string { return e.cause.Error() }
 func (e *previewSourceCheckError) Unwrap() error { return e.cause }
 
-func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool, warmup *warmupInput) (cacheledger.Result, error) {
+func (s *Service) publishPreviewCache(ctx context.Context, key string, plan *ledgerPreview, data []byte, original bool, warmup *warmupInput, background bool) (cacheledger.Result, error) {
 	unlock, err := s.orphans.lockKey(ctx, key)
 	if err != nil {
 		return cacheledger.Result{}, err
 	}
 	defer unlock()
 	if plan == nil {
-		return cacheledger.Result{}, s.fileCache.Store(ctx, key, data)
+		return cacheledger.Result{}, s.storePreview(ctx, key, data, background)
 	}
 	if original || plan.ref.Asset == "" {
 		return cacheledger.Result{}, nil
 	}
-	if err := s.fileCache.Store(ctx, key, data); err != nil {
+	if err := s.storePreview(ctx, key, data, background); err != nil {
 		return cacheledger.Result{}, err
 	}
 	if warmup != nil {
@@ -353,6 +353,11 @@ func (s *Service) deliverPreview(ctx context.Context, plan *ledgerPreview, resul
 		if err := s.ledger.Touch(ctx, plan.ref, plan.variant, result.ready, time.Now()); err != nil && ctx.Err() == nil {
 			logger.Warningf("cannot record image preview use: %v", err)
 		}
+	}
+	if foreground && result.spaceErr != nil && s.space != nil {
+		s.space.mu.Lock()
+		s.space.status.ForegroundUnstored++
+		s.space.mu.Unlock()
 	}
 	return result.data, nil
 }

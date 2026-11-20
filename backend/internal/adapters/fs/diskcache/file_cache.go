@@ -31,12 +31,19 @@ type FileCache struct {
 
 func NewFileCache(dir string) (*FileCache, error) {
 	cacheDir := filepath.Join(dir, "diskcache")
-
-	// Migrate existing cache files from old structure (if any)
 	if err := migrateOldCacheStructure(dir, cacheDir); err != nil {
 		logger.Warningf("failed to migrate old cache structure: %v\n", err)
 	}
+	return openFileCache(cacheDir)
+}
 
+// NewRetainedFileCache opens only the dedicated directory. Space-controlled
+// startup leaves the legacy directory in place and inventories asynchronously.
+func NewRetainedFileCache(dir string) (*FileCache, error) {
+	return openFileCache(filepath.Join(dir, "diskcache"))
+}
+
+func openFileCache(cacheDir string) (*FileCache, error) {
 	// Create the cache directory immediately with proper permissions
 	if err := os.MkdirAll(cacheDir, fileutils.PermDir); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
@@ -111,23 +118,7 @@ func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	removeTemp := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}
-	if _, err := tmp.Write(value); err != nil {
-		removeTemp()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		removeTemp()
-		return err
-	}
-	if err := tmp.Chmod(fileutils.PermFile); err != nil {
-		removeTemp()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
+	if err := writeCacheValue(ctx, tmp, value); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
@@ -136,6 +127,20 @@ func (f *FileCache) Store(ctx context.Context, key string, value []byte) error {
 		return err
 	}
 	return nil
+}
+
+func writeCacheValue(ctx context.Context, tmp *os.File, value []byte) (err error) {
+	defer func() { err = errors.Join(err, tmp.Close()) }()
+	if _, err := tmp.Write(value); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(fileutils.PermFile); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // HasSized checks the ledger's physical result without loading thumbnail bytes.

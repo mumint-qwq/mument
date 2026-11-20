@@ -72,6 +72,9 @@ func initializeConfig(configFile string, cliMode bool) {
 	if hours := Config.Server.PreviewOrphanGraceHours; hours != 0 && (hours < 24 || hours > 8760) {
 		logger.Fatal("previewOrphanGraceHours must be between 24 and 8760")
 	}
+	if err := validatePreviewSpace(Config.Server); err != nil {
+		logger.Fatal(err.Error())
+	}
 	setupFs()
 	setupServer()
 	setupHttp()

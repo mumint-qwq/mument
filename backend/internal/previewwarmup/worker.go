@@ -297,6 +297,11 @@ func (w *Worker) step(ctx context.Context, number int, manual *manualRun) string
 	if !w.svc.IdleForWarmup() {
 		return "foreground_busy"
 	}
+	if gate, ok := w.svc.(interface{ WarmupSpace() error }); ok {
+		if err := gate.WarmupSpace(); err != nil {
+			return err.Error()
+		}
+	}
 	if err := w.probe.poll(); err != nil {
 		return err.Error()
 	}
@@ -341,6 +346,9 @@ func (w *Worker) step(ctx context.Context, number int, manual *manualRun) string
 			default:
 				result, didWork = w.process(ctx, number, selected, scope, id, candidate), true
 			}
+		}
+		if strings.HasPrefix(result, "space_") {
+			return result
 		}
 		switch result {
 		case "foreground_busy", "scope_offline", "index_not_ready", "cancelled", "index_write_failed",
@@ -416,6 +424,9 @@ func (w *Worker) process(ctx context.Context, number int, selected lane, scope *
 		w.record(number, "index_not_ready", 0)
 		return "index_not_ready"
 	case errors.Is(err, errCPUThrottled), errors.Is(err, errLowSpace), errors.Is(err, errPressureUnavailable):
+		return err.Error()
+	case preview.IsSpaceDeferred(err):
+		w.record(number, err.Error(), 0)
 		return err.Error()
 	case errors.Is(err, errMemoryPressure):
 		outcome, attempts, retryAt = errMemoryPressure.Error(), c.Attempts, time.Now().Add(30*time.Second).Unix()
