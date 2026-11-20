@@ -677,7 +677,7 @@ func DeleteFiles(source, absPath string, isDir bool) error {
 		indexPath := index.MakeIndexPath(absPath, isDir).String()
 
 		// Perform the physical deletion
-		err := os.RemoveAll(absPath)
+		err := removeResource(source, index.Path, absPath, isDir)
 		if err != nil {
 			return err
 		}
@@ -702,7 +702,7 @@ func DeleteFiles(source, absPath string, isDir bool) error {
 	}
 
 	// Indexing disabled, just delete the file
-	return os.RemoveAll(absPath)
+	return removeResource(source, index.Path, absPath, isDir)
 }
 
 func RefreshIndex(source string, path string, isDir bool, recursive bool) error {
@@ -969,20 +969,26 @@ func writeFile(source, path string, in io.Reader) error {
 		return fmt.Errorf("%w: %q", errors.ErrIsDirectory, path)
 	}
 
-	// Open the file for writing (create if it doesn't exist, truncate if it does)
-	// For new files: permissions are set to fileutils.PermFile (subject to umask, then Chmod bypasses umask)
-	// For existing regular files: do not Chmod so saves preserve mode and special bits
-	file, err := os.OpenFile(realPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileutils.PermFile)
+	// Existing regular files retain their mode. Only a successful full
+	// write and close can confirm an overwrite event.
+	file, mutation, err := openResourceWriter(source, idx.Path, realPath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-
-	// Copy the contents from the reader to the file
-	_, err = io.Copy(file, in)
-	if err != nil {
-		return err
+	_, writeErr := io.Copy(file, in)
+	var written os.FileInfo
+	if mutation != nil && writeErr == nil {
+		written, _ = file.Stat()
 	}
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		mutation.FinishOverwrite(nil)
+		if writeErr != nil {
+			return writeErr
+		}
+		return closeErr
+	}
+	mutation.FinishOverwrite(written)
 
 	if applyDefaultFilePerm {
 		err = os.Chmod(realPath, fileutils.PermFile)

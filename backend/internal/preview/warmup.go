@@ -130,6 +130,11 @@ func (s *Service) WarmPreviewWhenIdle(ctx context.Context, file iteminfo.Extende
 }
 
 func (s *Service) checkWarmupCache(ctx context.Context, plan *ledgerPreview) error {
+	unlock, err := s.orphans.lockKey(ctx, plan.key)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cache, ok := s.fileCache.(interface {
 		HasSized(string, int64) (bool, error)
 	})

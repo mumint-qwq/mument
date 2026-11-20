@@ -941,6 +941,9 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 			}
 			// close file before moving
 			outFile.Close()
+			if r.Context().Err() != nil {
+				return 499, nil
+			}
 			// Move the completed file from the temp location to the final destination
 			err = files.MoveResource(false, source, source, tempFilePath, realPath)
 			if err != nil {
@@ -1031,6 +1034,12 @@ func ResourcePostHandler(w http.ResponseWriter, r *http.Request, d *Context) (in
 		activeUploadSessions.release(realPath, sessionID)
 		logger.Debugf("%v", err)
 		return http.StatusBadRequest, err
+	}
+
+	if r.Context().Err() != nil {
+		_ = os.Remove(tempFilePath)
+		activeUploadSessions.release(realPath, sessionID)
+		return 499, nil
 	}
 
 	err = files.MoveResource(false, source, source, tempFilePath, realPath)
