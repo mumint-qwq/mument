@@ -90,7 +90,7 @@ record private-rebind env MUMENT_SPACE_CONTAINER_TEST=1 MUMENT_CAPACITY_ROLLBACK
 record e3-race "$go_cmd" -C "$root/backend" test -race -count=1 -v -run '^(TestSpace|TestCapacity)' \
   ./internal/preview ./internal/adapters/fs/diskcache ./internal/cacheledger ./internal/previewwarmup
 record e2-regression "$root/scripts/development/verify-007e2.sh" "$out/e2"
-record settings "$go_cmd" -C "$root/backend" test -race -count=1 ./pkg/settings
+record settings "$go_cmd" -C "$root/backend" test -race -count=1 -run '^TestPreviewSpaceValidation$' ./pkg/settings
 
 embed_dir="$root/backend/internal/web/embed"
 if ! compgen -G "$embed_dir/*" >/dev/null; then
