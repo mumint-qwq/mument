@@ -122,7 +122,7 @@ func TestSpaceChangedRootAcrossRestartKeepsPublication(t *testing.T) {
 	st, err := os.Stat(f.source)
 	require.NoError(t, err)
 	file := testFileInfoFromStatForReview(f.source, st)
-	file.Source = "orphan-test"
+	file.Source, file.Type = "orphan-test", "image/jpeg"
 	data, err := f.s.getPreviewForFile(t.Context(), file, "small", "", 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, data)

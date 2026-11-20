@@ -46,10 +46,17 @@ func TestCapacityExportRollback(t *testing.T) {
 	t.Cleanup(func() { settings.Config.Server.CacheDir = previousCache })
 	f.start(t)
 
-	keep := newNoisyFile(t, f.root, "keep.jpg", 800, 600)
+	keep := newNoisyFile(t, f.root, "keep.jpg", 1600, 1200)
 	keep.Source = "orphan-test"
 	kept, err := f.s.getPreviewForFile(t.Context(), keep, "xlarge", "", 0)
 	require.NoError(t, err)
+	keepPlan, err := f.s.planLedgerPreview(t.Context(), keep, warmupSize)
+	require.NoError(t, err)
+	keptResult, found, err := f.s.ledger.Lookup(t.Context(), keepPlan.ref, keepPlan.variant)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, keptResult.Matches(kept))
+	require.FileExists(t, filepath.Join(f.cache, "diskcache", diskcache.RelativePath(keepPlan.key)))
 	keepOriginal, err := os.ReadFile(keep.RealPath)
 	require.NoError(t, err)
 	cold := newNoisyFile(t, f.root, "cold.jpg", 1600, 1200)
@@ -89,7 +96,7 @@ func TestCapacityExportRollback(t *testing.T) {
 	require.NoError(t, err)
 	guard := work[row.Path].Guard
 	ready, err := db.CommitImageMetadata(keep.Source, row.Path, row.Image.Version, guard, dbsql.ImageMetadataCommit{
-		State: iteminfo.ImageMetaReady, Width: 800, Height: 600, Orientation: 1, Ratio: 4.0 / 3.0,
+		State: iteminfo.ImageMetaReady, Width: 1600, Height: 1200, Orientation: 1, Ratio: 4.0 / 3.0,
 	})
 	require.NoError(t, err)
 	require.True(t, ready)
@@ -130,7 +137,7 @@ func TestCapacityReturnAfterRollback(t *testing.T) {
 	stat, err := os.Stat(cold)
 	require.NoError(t, err)
 	file := testFileInfoFromStatForReview(cold, stat)
-	file.Source = "orphan-test"
+	file.Source, file.Type = "orphan-test", "image/jpeg"
 	cached, err := f.s.getPreviewForFile(t.Context(), file, warmupSize, "", 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, cached)

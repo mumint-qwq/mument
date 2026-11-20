@@ -37,7 +37,7 @@ func TestOldReadsE3CapacityFixture(t *testing.T) {
 		stat, err := os.Stat(path)
 		require.NoError(t, err)
 		file := testFileInfoFromStatForReview(path, stat)
-		file.Source = "orphan-test"
+		file.Source, file.Type = "orphan-test", "image/jpeg"
 		data, err := GetPreviewForFile(t.Context(), file, "xlarge", "", 0)
 		require.NoError(t, err)
 		require.NotEmpty(t, data)
@@ -62,8 +62,8 @@ func TestOldReadsE3CapacityFixture(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, 4.0/3.0, rows[0].DisplayAspectRatio)
 	require.NotNil(t, rows[0].Image)
-	require.Equal(t, 800, rows[0].Image.Width)
-	require.Equal(t, 600, rows[0].Image.Height)
+	require.Equal(t, 1600, rows[0].Image.Width)
+	require.Equal(t, 1200, rows[0].Image.Height)
 	require.Equal(t, uint8(1), rows[0].Image.Orientation)
 	var guard uint64
 	var attempts int64
