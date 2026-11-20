@@ -32,7 +32,7 @@ type Report struct {
 	SnapshotID          string        `json:"snapshot_id,omitempty"`
 	Limits              OptionsReport `json:"limits"`
 	Stop                string        `json:"stop,omitempty"`
-	Ledger              Section       `json:"ledger"`
+	Ledger              LedgerSection `json:"ledger"`
 	Inventory           Section       `json:"inventory"`
 	MovesComplete       bool          `json:"move_coverage_complete"`
 	PartitionAvailable  *uint64       `json:"partition_available_bytes,omitempty"`
@@ -47,6 +47,12 @@ type OptionsReport struct {
 	Bytes        int64 `json:"logical_bytes_per_section"`
 	Milliseconds int64 `json:"milliseconds"`
 	Samples      int   `json:"samples_per_section"`
+}
+
+type LedgerSection struct {
+	Section
+	// ResultKeyCoverage tracks the snapshot registry independently of disk probes.
+	ResultKeyCoverage bool `json:"result_key_coverage_from_start"`
 }
 
 type Section struct {
@@ -148,10 +154,11 @@ func allocated(stat unix.Stat_t) int64 { return stat.Blocks * 512 }
 
 type classified struct {
 	publication
-	relative string
-	stat     unix.Stat_t
-	sample   Sample
-	eligible bool
+	relative    string
+	stat        unix.Stat_t
+	sample      Sample
+	eligible    bool
+	physicalGap bool
 }
 
 func classify(p publication, root int, moves map[string]bool, moveCoverage bool, ev evidence, now time.Time) classified {
@@ -168,6 +175,8 @@ func classify(p publication, root int, moves map[string]bool, moveCoverage bool,
 		c.sample.Reason = reason
 		if reason == "missing" {
 			c.sample.Class = "file_missing"
+		} else {
+			c.physicalGap = true
 		}
 		return c
 	}
@@ -219,7 +228,7 @@ func classify(p publication, root int, moves map[string]bool, moveCoverage bool,
 
 func Run(parent context.Context, opt Options) (Report, error) {
 	now := time.Now().UTC()
-	report := Report{StartedAt: now, EvidenceScope: "ledger_only", Ledger: newSection(), Inventory: newSection()}
+	report := Report{StartedAt: now, EvidenceScope: "ledger_only", Ledger: LedgerSection{Section: newSection()}, Inventory: newSection()}
 	if opt.CacheDir == "" || opt.Snapshot == "" || opt.AfterResult < 0 ||
 		((opt.AfterResult > 0 || opt.AfterCache != "") && !lowerHex(opt.ExpectSnapshot, 64)) ||
 		len(opt.AfterCache) > 1500 || opt.MaxEntries < 1 || opt.MaxEntries > 20000 ||
@@ -287,7 +296,7 @@ func Run(parent context.Context, opt Options) (Report, error) {
 		return report, err
 	}
 	registered := summarizeResults(ctx, opt, &report, root, batch)
-	scanInventory(ctx, opt, &report.Inventory, w, registered, report.Ledger.Coverage, ev)
+	scanInventory(ctx, opt, &report.Inventory, w, registered, report.Ledger.ResultKeyCoverage, ev)
 	if !unchanged() {
 		return report, errors.New("ledger snapshot changed; discard the report")
 	}
@@ -307,7 +316,7 @@ func finishReport(report *Report, parent, ctx context.Context) {
 	}
 }
 
-func scanResults(ctx context.Context, db *sql.DB, opt Options, section *Section, root int,
+func scanResults(ctx context.Context, db *sql.DB, opt Options, section *LedgerSection, root int,
 	moves map[string]bool, moveCoverage bool, ev evidence, now time.Time) ([]classified, error) {
 	section.AfterRow, section.NextRow = opt.AfterResult, opt.AfterResult
 	if ctx.Err() != nil {
@@ -325,6 +334,7 @@ func scanResults(ctx context.Context, db *sql.DB, opt Options, section *Section,
 	defer rows.Close()
 	var batch []classified
 	var recorded, current int64
+	var resultKeyGap bool
 	for rows.Next() {
 		if len(batch) == opt.MaxEntries {
 			section.Stop = "entry_limit"
@@ -341,12 +351,13 @@ func scanResults(ctx context.Context, db *sql.DB, opt Options, section *Section,
 		if p.size > opt.MaxBytes || c.stat.Size > opt.MaxBytes {
 			c.sample.Class, c.sample.Reason, c.sample.Estimate = "skipped", "object_exceeds_byte_limit", ""
 			c.eligible, c.stat, c.size = false, unix.Stat_t{}, 0
-			section.Gaps = true
+			resultKeyGap = true
 		} else if p.size > opt.MaxBytes-recorded || c.stat.Size > opt.MaxBytes-current {
 			section.Stop = "byte_limit"
 			break
 		}
-		section.Gaps = section.Gaps || c.sample.Reason == "invalid_ledger_record"
+		resultKeyGap = resultKeyGap || c.sample.Reason == "invalid_ledger_record"
+		section.Gaps = section.Gaps || resultKeyGap || c.physicalGap
 		batch = append(batch, c)
 		recorded += c.size
 		current += c.stat.Size
@@ -359,7 +370,8 @@ func scanResults(ctx context.Context, db *sql.DB, opt Options, section *Section,
 	}
 	section.Visited = len(batch)
 	section.Complete = section.Stop == ""
-	section.Coverage = section.Complete && !section.Gaps && opt.AfterResult == 0
+	section.ResultKeyCoverage = section.Complete && !resultKeyGap && opt.AfterResult == 0
+	section.Coverage = section.ResultKeyCoverage && !section.Gaps
 	return batch, nil
 }
 
@@ -383,7 +395,7 @@ func summarizeResults(ctx context.Context, opt Options, report *Report, root int
 		first := batch[group[0]]
 		reason := "fixture_estimate"
 		switch {
-		case !report.Ledger.Coverage:
+		case !report.Ledger.ResultKeyCoverage:
 			reason = "result_coverage_incomplete"
 		case first.stat.Nlink != 1:
 			reason = "hardlink_or_unavailable"
@@ -417,7 +429,7 @@ func summarizeResults(ctx context.Context, opt Options, report *Report, root int
 	}
 	var counted totals
 	for _, c := range batch {
-		counted.add(&report.Ledger, c.sample, opt.Samples, c.size, c.stat)
+		counted.add(&report.Ledger.Section, c.sample, opt.Samples, c.size, c.stat)
 	}
 	return registered
 }

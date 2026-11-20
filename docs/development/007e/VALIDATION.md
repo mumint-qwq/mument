@@ -22,7 +22,7 @@ go -C backend build -o /tmp/preview-cache-trial ./cmd/preview-cache-trial
   -max-entries 2048 -max-bytes 268435456 -max-time 3s -samples 12 > /tmp/007e-report.json
 ```
 
-继续时将上一份输出的 `snapshot_id`、`ledger.next_result`、`inventory.next_cache` 分别传给 `-expect-snapshot`、`-after-result`、`-after-cache`。目录游标 `done` 可继续传递。若需要在完整账本覆盖下继续目录，可将 `-after-result` 留为 0，以重新读出完整的小账本。各页 `window_complete` 表示本次读到范围末尾，`coverage_from_start` 表示从头且无覆盖缺口。快照或目录发生变化时重新从头试算。
+继续时将上一份输出的 `snapshot_id`、`ledger.next_result`、`inventory.next_cache` 分别传给 `-expect-snapshot`、`-after-result`、`-after-cache`。目录游标 `done` 可继续传递。若需要在完整账本覆盖下继续目录，可将 `-after-result` 留为 0，以重新读出完整的小账本。各页 `window_complete` 表示本次读到范围末尾，`coverage_from_start` 表示从头且无覆盖缺口。账本另报 `result_key_coverage_from_start`，说明快照内的结果键是否完整覆盖。账本访问缓存时遇到符号链接、权限不足、挂载边界或无法读取，即使目录游标已是 `done`，也会使当前报告部分完成。明确缺失和大小不一致仍是已观测状态。快照或目录发生变化时重新从头试算。
 
 | 退出码 | 含义 |
 | --- | --- |

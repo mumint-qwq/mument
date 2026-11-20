@@ -371,3 +371,77 @@ func TestTrialScopeAndOversize(t *testing.T) {
 	_, err = Run(t.Context(), f.opt)
 	require.ErrorContains(t, err, "dedicated diskcache: symlink")
 }
+
+func TestTrialLedgerDiskCoverageAfterInventoryDone(t *testing.T) {
+	dir := t.TempDir()
+	f := newFixture(t, dir)
+	p := f.publication(t, "ledger-probe", "abcd", "", 0, false)
+	path := f.store(t, p.key, "abcd")
+	f.seal(t)
+
+	clean, err := Run(t.Context(), f.opt)
+	require.NoError(t, err)
+	require.Empty(t, clean.Stop)
+	require.True(t, clean.Ledger.Coverage)
+	require.True(t, clean.Ledger.ResultKeyCoverage)
+	require.Equal(t, "done", clean.Inventory.NextCache)
+
+	opt := f.opt
+	opt.ExpectSnapshot = clean.SnapshotID
+	opt.AfterCache = clean.Inventory.NextCache
+
+	outside := filepath.Join(dir, "outside-cache")
+	require.NoError(t, os.WriteFile(outside, []byte("outside"), 0o600))
+	for _, tc := range []struct {
+		name, class, reason string
+		size                int64
+		gap                 bool
+		replace             func(*testing.T)
+	}{
+		{"regular", "uncertain", "no_retirement_or_reference_coverage", 4, false, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte("abcd"), 0o600))
+		}},
+		{"symlink", "uncertain", "symlink", 0, true, func(t *testing.T) {
+			require.NoError(t, os.Symlink(outside, path))
+		}},
+		{"directory", "uncertain", "not_regular", 0, true, func(t *testing.T) {
+			require.NoError(t, os.Mkdir(path, 0o700))
+		}},
+		{"wrong size", "size_mismatch", "recorded_size_differs", 2, false, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte("ab"), 0o600))
+		}},
+		{"missing", "file_missing", "missing", 0, false, func(*testing.T) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Remove(path); err != nil {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			}
+			tc.replace(t)
+			report, err := Run(t.Context(), opt)
+			require.NoError(t, err)
+
+			require.True(t, report.Ledger.Complete)
+			require.True(t, report.Ledger.ResultKeyCoverage)
+			require.Equal(t, !tc.gap, report.Ledger.Coverage)
+			require.Equal(t, tc.gap, report.Ledger.Gaps)
+			require.Equal(t, map[string]int{tc.reason: 1}, report.Ledger.Reasons)
+			require.Equal(t, 1, report.Ledger.Classes[tc.class].Count)
+			require.Equal(t, tc.size, report.Ledger.LogicalBytes)
+			require.Equal(t, p.size, report.Ledger.RecordedBytes)
+			require.Equal(t, clean.Ledger.NextRow, report.Ledger.NextRow)
+			require.True(t, report.Inventory.Complete)
+			require.False(t, report.Inventory.Gaps)
+			require.Zero(t, report.Inventory.Visited)
+			require.Zero(t, report.EstimatedCandidates)
+			require.Zero(t, report.ExecutableDeletes)
+			if tc.gap {
+				require.Equal(t, "partial", report.Stop)
+			} else {
+				require.Empty(t, report.Stop)
+			}
+		})
+	}
+	data, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	require.Equal(t, "outside", string(data))
+}
