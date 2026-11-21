@@ -76,3 +76,11 @@ by the existing HTTP layer. No endpoint accepts a digest/asset/path for reuse.
 Only administrator configuration selects background scopes. Aggregate status
 contains no file identities. The candidate has a single background generator
 owner (the existing preview service); F is a verifier and reference writer.
+
+The independent review revision changes path 1's hint delivery to a disposable
+bounded memory queue and one background batch transaction. C's captured original
+asset is only a preference after exact target hashing; it never proves content.
+Path 2 ranks verified ready variants, preferring current xlarge over small-only
+historical duplicates. Physical gates are released between candidates and the
+selected witness is rechecked before the final location/SQL window. Neither path
+combines historical assets or preserves variants absent from the chosen asset.

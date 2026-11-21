@@ -103,3 +103,26 @@ therefore cannot cause F to skip an unproven new generation. A completed proof
 can still be reused without rereading originals. Persisted hints outside current
 scopes are removed; not-yet-indexed targets fall back to history rediscovery so
 an unavailable hint cannot indefinitely block later high-priority hints.
+
+### Independent review correction
+
+Copy hints use a nonblocking 256-entry memory queue. The background worker drains
+16 entries per transaction with a single 100 ms deadline. Full queues, busy SQL
+and process exit lose hints and their original-asset preference; index discovery
+repairs coverage. The move request performs no F SQL and never waits for hashing
+or hint persistence. Existing C move intent work remains unchanged.
+
+A known original with verified usable results has priority after full target
+verification. External discovery ranks current xlarge, then current large, then
+valid variant count, with deterministic asset-ID ties. A fresh witness check and
+existing E intent checks protect attachment. Preview verification remains bounded
+by 32 MiB, at most 16 candidate assets and 16 results per asset. Historical assets
+are not merged; variants split between assets cannot all be retained by one
+binding. After losing a hint, coverage ranking replaces original-identity priority.
+
+The revised Docker entry runs preview/worker/ledger F tests as well as the four
+compatibility phases. It verifies fixed binary SHA-256 before building, reads
+runtime cgroup limits/events in preview containers, records each container's
+exit/OOM state, and compares `STATX_MNT_ID_UNIQUE` across four new containers.
+Ordinary mount IDs are not accepted as unique across container lifetimes.
+This is an operator entry, not evidence that Docker was executed in this session.

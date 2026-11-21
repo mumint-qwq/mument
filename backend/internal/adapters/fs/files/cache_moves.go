@@ -26,6 +26,7 @@ type ResourceMove struct {
 
 type observedMove struct {
 	src, dst         *indexing.Index
+	preferred        cacheledger.Ref
 	info             os.FileInfo
 	after            os.FileInfo
 	copy             bool
@@ -84,7 +85,7 @@ func (s *Service) moveResources(batch *IndexImpactBatch, moves []ResourceMove) [
 			}
 		}
 		if obs.copy && !m.Directory {
-			preview.HintCopiedContent(m.Target, m.To, obs.exdev)
+			preview.HintCopiedContent(m.Target, m.To, obs.exdev, obs.preferred.Asset)
 		}
 		s.finishMove(batch, obs.src, obs.dst, m.Directory, m.From, m.To, obs.directoryVersion)
 	}
@@ -118,11 +119,13 @@ func (s *Service) renameResources(moves []ResourceMove, observations []observedM
 		if err == nil && before.Mode().IsRegular() {
 			if obs.info != nil && cacheledger.FromFileInfo(obs.info) != cacheledger.FromFileInfo(before) {
 				obs.info = nil // changed after intent; proceed with ordinary filesystem semantics
+				obs.preferred = cacheledger.Ref{}
 			} else {
 				obs.info = before
 			}
 		} else {
 			obs.info = nil
+			obs.preferred = cacheledger.Ref{}
 		}
 		if repo != nil && obs.info != nil && !m.Directory {
 			if target, targetErr := os.Lstat(m.To); targetErr == nil && target.Mode().IsRegular() {
@@ -212,6 +215,7 @@ func prepareCacheMoves(ctx context.Context, repo *cacheledger.Repository, moves 
 		if !found {
 			continue
 		}
+		obs.preferred = ref
 		intents = append(intents, cacheledger.Move{Ref: ref, TargetSource: dst, TargetPath: target})
 		slots = append(slots, i)
 	}

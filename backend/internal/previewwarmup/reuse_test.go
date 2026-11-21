@@ -54,7 +54,7 @@ func TestContentWorkerIndependentDiscoveryAndRestart(t *testing.T) {
 	require.True(t, w.processReuse(t.Context(), &w.scopes[0], c))
 	require.Equal(t, uint64(1), w.Snapshot().Counts["reused"])
 	require.EqualValues(t, 1, w.Snapshot().CandidateChecks)
-	require.EqualValues(t, 1, w.Snapshot().PhysicalHits)
+	require.EqualValues(t, 3, w.Snapshot().PhysicalHits)
 	require.Positive(t, w.Snapshot().PreviewBytes)
 	retained, err := w.Retention(t.Context(), "")
 	require.NoError(t, err)

@@ -99,6 +99,7 @@ func TestContentRealEXDEVCopyHint(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(b, "missing.jpg"))
 	require.Equal(t, 2, batch.Len())
 
+	require.NoError(t, func() error { _, e := svc.FlushContentHints(t.Context()); return e }())
 	hints, err := svc.ContentLedger().ContentHints(t.Context())
 	require.NoError(t, err)
 	require.Len(t, hints, 1)

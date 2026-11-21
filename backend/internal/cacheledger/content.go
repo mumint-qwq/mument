@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS content_hints (
  source TEXT NOT NULL, path TEXT NOT NULL, version TEXT NOT NULL,
  exdev INTEGER NOT NULL, created INTEGER NOT NULL, PRIMARY KEY(source,path));
 CREATE INDEX IF NOT EXISTS content_hint_age ON content_hints(created,source,path);
+CREATE TABLE IF NOT EXISTS content_hint_preferences (
+ source TEXT NOT NULL, path TEXT NOT NULL, version TEXT NOT NULL, asset TEXT NOT NULL, PRIMARY KEY(source,path));
 `
 
 type ContentProof struct {
@@ -254,24 +256,51 @@ func boolInt(b bool) int {
 	return 0
 }
 
+// HintContent is for background/test callers. HTTP move paths only enqueue.
 func (r *Repository) HintContent(ctx context.Context, source, path string, v Version, exdev bool) error {
-	if !v.Strong || !validPath(source, path) {
-		return fmt.Errorf("invalid content hint")
-	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO content_hints SELECT ?,?,?,?,? WHERE
- (SELECT COUNT(*) FROM content_hints)<4096 OR EXISTS(SELECT 1 FROM content_hints WHERE source=? AND path=?)
- ON CONFLICT(source,path) DO UPDATE SET version=excluded.version,exdev=excluded.exdev,created=excluded.created`, source, path, versionKey(v), boolInt(exdev), time.Now().Unix(), source, path)
-	return err
+	return r.HintContentBatch(ctx, []ContentHint{{Source: source, Path: path, Version: v, EXDEV: exdev}})
 }
 
 type ContentHint struct {
-	Source, Path string
-	Version      Version
-	EXDEV        bool
+	Source, Path   string
+	Version        Version
+	EXDEV          bool
+	PreferredAsset string // Selection only; never original-content evidence.
+}
+
+// One bounded transaction per background page, never one timeout per move.
+func (r *Repository) HintContentBatch(ctx context.Context, hints []ContentHint) error {
+	if len(hints) > 16 {
+		return fmt.Errorf("content hint batch exceeds limit")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, h := range hints {
+		if !h.Version.Strong || !validPath(h.Source, h.Path) {
+			return fmt.Errorf("invalid content hint")
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO content_hints SELECT ?,?,?,?,? WHERE
+ (SELECT COUNT(*) FROM content_hints)<4096 OR EXISTS(SELECT 1 FROM content_hints WHERE source=? AND path=?)
+ ON CONFLICT(source,path) DO UPDATE SET version=excluded.version,exdev=excluded.exdev,created=excluded.created`, h.Source, h.Path, versionKey(h.Version), boolInt(h.EXDEV), time.Now().Unix(), h.Source, h.Path); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM content_hint_preferences WHERE source=? AND path=?`, h.Source, h.Path); err != nil {
+			return err
+		}
+		if h.PreferredAsset != "" {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO content_hint_preferences SELECT source,path,version,? FROM content_hints WHERE source=? AND path=? AND version=?`, h.PreferredAsset, h.Source, h.Path, versionKey(h.Version)); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) ContentHints(ctx context.Context) ([]ContentHint, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT source,path,version,exdev FROM content_hints ORDER BY created,source,path LIMIT 16`)
+	rows, err := r.db.QueryContext(ctx, `SELECT h.source,h.path,h.version,h.exdev,COALESCE(p.asset,'') FROM content_hints h LEFT JOIN content_hint_preferences p ON p.source=h.source AND p.path=h.path AND p.version=h.version ORDER BY h.created,h.source,h.path LIMIT 16`)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +309,7 @@ func (r *Repository) ContentHints(ctx context.Context) ([]ContentHint, error) {
 	for rows.Next() {
 		var h ContentHint
 		var v string
-		if err = rows.Scan(&h.Source, &h.Path, &v, &h.EXDEV); err != nil {
+		if err = rows.Scan(&h.Source, &h.Path, &v, &h.EXDEV, &h.PreferredAsset); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(v), &h.Version); err != nil {
@@ -291,18 +320,19 @@ func (r *Repository) ContentHints(ctx context.Context) ([]ContentHint, error) {
 	return out, rows.Err()
 }
 func (r *Repository) DropContentHint(ctx context.Context, h ContentHint) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM content_hints WHERE source=? AND path=? AND version=?`, h.Source, h.Path, versionKey(h.Version))
+	_, err := r.db.ExecContext(ctx, `DELETE FROM content_hint_preferences WHERE source=? AND path=? AND version=?; DELETE FROM content_hints WHERE source=? AND path=? AND version=?`, h.Source, h.Path, versionKey(h.Version), h.Source, h.Path, versionKey(h.Version))
 	return err
 }
 func (r *Repository) PruneContentWork(ctx context.Context) error {
 	// No unbounded historical per-version log. Removed paths expire after 30 days;
 	// proofs remain with assets and are never reconstructed from target files.
 	_, err := r.db.ExecContext(ctx, `DELETE FROM content_work WHERE rowid IN (SELECT rowid FROM content_work WHERE updated<? ORDER BY updated LIMIT 32);
- DELETE FROM content_hints WHERE rowid IN (SELECT rowid FROM content_hints WHERE created<? ORDER BY created LIMIT 32)`, time.Now().Add(-30*24*time.Hour).Unix(), time.Now().Add(-24*time.Hour).Unix())
+ DELETE FROM content_hints WHERE rowid IN (SELECT rowid FROM content_hints WHERE created<? ORDER BY created LIMIT 32);
+ DELETE FROM content_hint_preferences WHERE rowid IN (SELECT p.rowid FROM content_hint_preferences p LEFT JOIN content_hints h ON h.source=p.source AND h.path=p.path AND h.version=p.version WHERE h.source IS NULL LIMIT 32)`, time.Now().Add(-30*24*time.Hour).Unix(), time.Now().Add(-24*time.Hour).Unix())
 	return err
 }
 
-func (r *Repository) ContentMatches(ctx context.Context, p ContentProof) ([]ContentProof, error) {
+func (r *Repository) ContentMatches(ctx context.Context, p ContentProof, preferred ...string) ([]ContentProof, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT p.asset,p.digest,p.bytes FROM content_ready q INDEXED BY content_ready_size JOIN content_proofs p ON p.asset=q.asset WHERE q.algorithm=? AND q.bytes=? AND q.digest=? ORDER BY q.asset LIMIT 16`, ContentAlgorithm, p.Bytes, p.Digest)
 	if err != nil {
 		return nil, err
@@ -316,7 +346,27 @@ func (r *Repository) ContentMatches(ctx context.Context, p ContentProof) ([]Cont
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if len(preferred) > 0 && preferred[0] != "" {
+		var q ContentProof
+		err = r.db.QueryRowContext(ctx, `SELECT asset,digest,bytes FROM content_ready WHERE asset=? AND algorithm=? AND bytes=? AND digest=?`, preferred[0], ContentAlgorithm, p.Bytes, p.Digest).Scan(&q.Asset, &q.Digest, &q.Bytes)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if err == nil {
+			chosen := []ContentProof{q}
+			for _, c := range out {
+				if c.Asset != q.Asset && len(chosen) < 16 {
+					chosen = append(chosen, c)
+				}
+			}
+			out = chosen
+		}
+	}
+	return out, nil
 }
 func (r *Repository) ContentPending(ctx context.Context, key string) (bool, error) {
 	var yes bool

@@ -36,12 +36,18 @@ record race "$go_cmd" -C "$root/backend" test -race -p 1 -count=1 ./internal/cac
 record all env MUMENT_MOVE_HANDLER_TRANSPORT=1 "$go_cmd" -C "$root/backend" test -p 1 -count=1 ./...
 record files-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-files-tests" ./internal/adapters/fs/files
 if [[ -x $out/f-files-tests ]]; then
- record private-exdev env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$out/f-files-tests" -test.run '^TestContentRealEXDEVCopyHint$' -test.v
+ record private-exdev env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$out/f-files-tests" -test.run '^(TestContentRealEXDEVCopyHint|TestContentCopyHintsNeverWaitForLedgerWriter)$' -test.v
 fi
 record fileutils-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-fileutils-tests" ./internal/adapters/fs/fileutils
 if [[ -x $out/f-fileutils-tests ]]; then
  record private-delayed-source env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$out/f-fileutils-tests" -test.run '^TestContentRealEXDEVDelayedSourceRemoval$' -test.v
 fi
+record reuse-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-reuse-tests" ./internal/previewwarmup
+if [[ -x $out/f-reuse-tests ]]; then
+ record private-worker env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$out/f-reuse-tests" -test.run '^TestContentWorkerVariantCoverageAndCopyPreference$' -test.v
+fi
+record private-race env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$go_cmd" -C "$root/backend" test -race -p 1 -count=1 -v -run '^(TestContentWorkerVariantCoverageAndCopyPreference|TestContentCopyHintsNeverWaitForLedgerWriter)$' ./internal/previewwarmup ./internal/adapters/fs/files
+record ledger-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-ledger-tests" ./internal/cacheledger
 record preview-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-preview-tests" ./internal/preview
 # E3 -> F -> E3 -> F uses the same real cache, index identities and ledger.
 mkdir "$scratch/e3" "$scratch/rollback"
@@ -56,7 +62,7 @@ if [[ -x $out/e3-preview-tests && -x $out/f-preview-tests ]]; then
  record rollback-f-return env MUMENT_REUSE_ROLLBACK_PHASE=f-return "$out/f-preview-tests" -test.run '^TestContentRollbackF$' -test.v
  cp "$scratch/rollback/state.json" "$out/rollback-state.json"
 fi
-(cd "$out" && sha256sum f-files-tests f-fileutils-tests f-preview-tests e3-preview-tests) > "$out/binaries.sha256"
+(cd "$out" && sha256sum f-files-tests f-fileutils-tests f-reuse-tests f-ledger-tests f-preview-tests e3-preview-tests) > "$out/binaries.sha256"
 "$go_cmd" version -m "$out/f-preview-tests" > "$out/buildinfo.txt"
 date -Is > "$out/finished.txt"
 printf '%s\n' "$failures" > "$out/failed-stages.txt"

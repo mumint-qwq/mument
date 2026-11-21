@@ -62,6 +62,13 @@ func fRollbackStart(t *testing.T) (string, *Service, iteminfo.ExtendedFileInfo) 
 	require.NoError(t, unix.Statx(unix.AT_FDCWD, root, 0, unix.STATX_MNT_ID, &rootStat))
 	require.NoError(t, unix.Statx(unix.AT_FDCWD, filepath.Join(dir, "cache"), 0, unix.STATX_MNT_ID, &cacheStat))
 	t.Logf("source mount=%d cache mount=%d", rootStat.Mnt_id, cacheStat.Mnt_id)
+	if os.Getenv("MUMENT_REUSE_UNIQUE_MOUNTS") == "1" {
+		require.NoError(t, unix.Statx(unix.AT_FDCWD, root, 0, unix.STATX_MNT_ID_UNIQUE, &rootStat))
+		require.NoError(t, unix.Statx(unix.AT_FDCWD, filepath.Join(dir, "cache"), 0, unix.STATX_MNT_ID_UNIQUE, &cacheStat))
+		require.NotZero(t, rootStat.Mask&unix.STATX_MNT_ID_UNIQUE)
+		require.NotZero(t, cacheStat.Mask&unix.STATX_MNT_ID_UNIQUE)
+		t.Logf("source_unique_mount_id=%d cache_unique_mount_id=%d", rootStat.Mnt_id, cacheStat.Mnt_id)
+	}
 	return dir, s, iteminfo.ExtendedFileInfo{Source: "reuse-rollback", RealPath: filepath.Join(root, "source.jpg"), FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: "source.jpg", Type: "image/jpeg", HasPreview: true}}}
 }
 func fRollbackRead(t *testing.T, dir string) fRollbackState {

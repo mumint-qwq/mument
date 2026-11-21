@@ -26,7 +26,7 @@ type ContentOutcome struct {
 
 // ReuseContent is background-only. It never decodes or records foreground use.
 // The caller supplies D's descriptor guards plus durable scope revalidation.
-func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileInfo, open func(context.Context) (*os.File, error), stat func(context.Context) (os.FileInfo, error), pace func(context.Context, int) error) (ContentOutcome, error) {
+func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileInfo, open func(context.Context) (*os.File, error), stat func(context.Context) (os.FileInfo, error), pace func(context.Context, int) error, preferred ...string) (ContentOutcome, error) {
 	out := ContentOutcome{Reason: "no_old_proof"}
 	if s.ledger == nil {
 		return out, errors.New("ledger_unavailable")
@@ -147,7 +147,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 	}
 	// Query exact digest after the one target read; unrelated same-size files
 	// cannot hide a match behind the cheap candidate limit.
-	candidates, err = s.ledger.ContentMatches(ctx, proof)
+	candidates, err = s.ledger.ContentMatches(ctx, proof, preferred...)
 	if err != nil {
 		return out, err
 	}
@@ -157,51 +157,103 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 		return out, ErrPreviewBusy
 	}
 	defer s.warmupRequest.Store(false)
-	remainingPreviewBytes := int64(32 << 20)
+	// Reserve half the existing integrity budget for the final gated witness
+	// check; ranking must not consume the bytes needed to attach its winner.
+	selectionBytes := int64(16 << 20)
+	type choice struct {
+		proof   cacheledger.ContentProof
+		results []cacheledger.ContentResult
+		witness cacheledger.ContentResult
+		score   [4]int
+	}
+	var choices []choice
+	// Validate coverage, not just the first usable small result. Each candidate's
+	// physical gates are released before another candidate's gates are acquired.
 	for _, candidate := range candidates {
 		out.CandidateChecks++
-		results, err := s.ledger.ContentResults(ctx, candidate.Asset)
-		if err != nil {
-			return out, err
+		results, e := s.ledger.ContentResults(ctx, candidate.Asset)
+		if e != nil {
+			return out, e
 		}
-		unlock, err := s.lockContentKeys(ctx, results)
-		if err != nil {
-			return out, err
+		upper := [4]int{0, 0, 0, len(results)}
+		if len(preferred) > 0 && candidate.Asset == preferred[0] {
+			upper[0] = 1
 		}
-		var witness *cacheledger.ContentResult
-		for i := range results {
-			p := &results[i]
-			if p.Size <= 0 || p.Size > remainingPreviewBytes {
-				continue
+		for _, p := range results {
+			if p.Variant == ledgerVariant(file, "xlarge") {
+				upper[1] = 1
 			}
-			// Isolated/held publications are protected; F never reads their paths.
-			pending, e := s.ledger.ContentPending(ctx, p.Key)
+			if p.Variant == ledgerVariant(file, "large") {
+				upper[2] = 1
+			}
+		}
+		var best [4]int
+		for _, previous := range choices {
+			if contentCoverageGreater(previous.score, best) {
+				best = previous.score
+			}
+		}
+		if len(choices) > 0 && !contentCoverageGreater(upper, best) {
+			continue
+		}
+		unlock, e := s.lockContentKeys(ctx, results)
+		if e != nil {
+			return out, e
+		}
+		c := choice{proof: candidate, results: results}
+		for _, p := range results {
+			valid, e := s.validateContentResult(ctx, p, &selectionBytes, &out)
 			if e != nil {
 				unlock()
 				return out, e
 			}
-			if pending {
-				out.ReclamationDeferrals++
+			if !valid {
 				continue
 			}
-			remainingPreviewBytes -= p.Size
-			out.PreviewBytes += uint64(p.Size)
-			var data []byte
-			var found bool
-			if sized, ok := s.fileCache.(interface {
-				LoadSized(context.Context, string, int64) ([]byte, bool, error)
-			}); ok {
-				data, found, err = sized.LoadSized(ctx, p.Key, p.Size)
-			} else {
-				data, found, err = s.fileCache.Load(ctx, p.Key)
+			c.score[3]++
+			if len(preferred) > 0 && preferred[0] == candidate.Asset {
+				c.score[0] = 1
 			}
-			if err == nil && found && p.Matches(data) {
-				witness = p
-				out.PhysicalHits++
+			if p.Variant == ledgerVariant(file, "xlarge") {
+				c.score[1] = 1
+				c.witness = p
+			} else if c.witness.Key == "" {
+				c.witness = p
+			}
+			if p.Variant == ledgerVariant(file, "large") {
+				c.score[2] = 1
+			}
+		}
+		unlock()
+		if c.witness.Key != "" {
+			choices = append(choices, c)
+			if c.score[0] == 1 {
 				break
 			}
 		}
-		if witness == nil {
+	}
+	sort.SliceStable(choices, func(i, j int) bool {
+		for k := range choices[i].score {
+			if choices[i].score[k] != choices[j].score[k] {
+				return choices[i].score[k] > choices[j].score[k]
+			}
+		}
+		return choices[i].proof.Asset < choices[j].proof.Asset
+	})
+	remainingPreviewBytes := int64(32<<20) - int64(out.PreviewBytes)
+	for _, c := range choices {
+		unlock, e := s.lockContentKeys(ctx, c.results)
+		if e != nil {
+			return out, e
+		}
+		// Revalidate the chosen witness after reacquiring its gates. E may have
+		// reclaimed it while other candidates were ranked. Both reads share 32 MiB.
+		valid, e := s.validateContentResult(ctx, c.witness, &remainingPreviewBytes, &out)
+		if e != nil {
+			unlock()
+			return out, e
+		}
+		if !valid {
 			unlock()
 			continue
 		}
@@ -218,7 +270,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 			e = ErrPreviewBusy
 		}
 		if e == nil {
-			e = s.ledger.BindContent(ctx, plan.ref, candidate, *witness)
+			e = s.ledger.BindContent(ctx, plan.ref, c.proof, c.witness)
 		}
 		release()
 		unlock()
@@ -265,10 +317,10 @@ func (s *Service) lockContentKeys(ctx context.Context, results []cacheledger.Con
 	return release, nil
 }
 
-// HintCopiedContent performs only bounded observation/SQL after a successful
-// copy. A lost hint is recovered by index pagination; source deletion is owned
-// exclusively by existing MoveByCopy semantics.
-func HintCopiedContent(source, path string, exdev bool) {
+// HintCopiedContent observes a successful copy and tries a bounded memory queue.
+// It performs no SQL, waits for no receiver, and starts no goroutine. Losing a
+// hint (including its preferred asset) falls back to ordinary index discovery.
+func HintCopiedContent(source, path string, exdev bool, preferred ...string) {
 	if service == nil || service.closed.Load() || service.ledger == nil {
 		return
 	}
@@ -298,9 +350,72 @@ func HintCopiedContent(source, path string, exdev bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	h := cacheledger.ContentHint{Source: source, Path: path, Version: cacheledger.FromFileInfo(info), EXDEV: exdev}
+	if !h.Version.Strong {
+		return
+	}
+	if len(preferred) > 0 {
+		h.PreferredAsset = preferred[0]
+	}
+	select {
+	case service.contentHints <- h:
+	default:
+	}
+}
+
+// FlushContentHints is called only by the independent F worker. At most sixteen
+// hints share one transaction and one deadline; contention drops this batch.
+// Shutdown never needs to drain disposable hints before closing the ledger.
+func (s *Service) FlushContentHints(ctx context.Context) (int, error) {
+	var batch []cacheledger.ContentHint
+	for len(batch) < 16 {
+		select {
+		case h := <-s.contentHints:
+			batch = append(batch, h)
+		default:
+			goto persist
+		}
+	}
+persist:
+	if len(batch) == 0 {
+		return 0, nil
+	}
+	bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	_ = service.ledger.HintContent(ctx, source, path, cacheledger.FromFileInfo(info), exdev)
+	return len(batch), s.ledger.HintContentBatch(bounded, batch)
+}
+
+func (s *Service) validateContentResult(ctx context.Context, p cacheledger.ContentResult, remaining *int64, out *ContentOutcome) (bool, error) {
+	if p.Size <= 0 || p.Size > *remaining {
+		return false, nil
+	}
+	pending, err := s.ledger.ContentPending(ctx, p.Key)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		out.ReclamationDeferrals++
+		return false, nil
+	}
+	*remaining -= p.Size
+	out.PreviewBytes += uint64(p.Size)
+	var data []byte
+	var found bool
+	if sized, ok := s.fileCache.(interface {
+		LoadSized(context.Context, string, int64) ([]byte, bool, error)
+	}); ok {
+		data, found, err = sized.LoadSized(ctx, p.Key, p.Size)
+	} else {
+		data, found, err = s.fileCache.Load(ctx, p.Key)
+	}
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err == nil && found && p.Matches(data) {
+		out.PhysicalHits++
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *Service) ContentCacheReady(ctx context.Context) error {
@@ -313,4 +428,14 @@ func (s *Service) ContentCacheReady(ctx context.Context) error {
 	}
 	raw, _ := json.Marshal(id)
 	return s.ledger.BindContentScope(ctx, "cache-root", string(raw))
+}
+
+// Lexicographic: known original, current xlarge, current large, variant count.
+func contentCoverageGreater(a, b [4]int) bool {
+	for k := range a {
+		if a[k] != b[k] {
+			return a[k] > b[k]
+		}
+	}
+	return false
 }

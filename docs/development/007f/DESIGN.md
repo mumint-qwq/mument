@@ -149,3 +149,38 @@ Only isolated eligibility timestamps are aged to make E2 grace testable; no real
 production grace is shortened. Synthetic cgroup inputs do not prove actual
 container resource enforcement. Real process exits separately cover claiming,
 complete hash before SQL, and committed binding before work cleanup.
+
+## Independent review revision: candidate choice and move latency
+
+The `a0ab1e5` independent review found two reproducible gaps: first-asset selection
+could discard an existing xlarge publication, and per-file hint SQL could add
+approximately 100 ms of writer contention for every copied file.
+
+Successful regular-file copies now enqueue a target observation in a 256-entry
+process-local channel, without SQL, waiting for a receiver, or a goroutine per
+file. The existing C preparation supplies the observed original asset when
+available; it is only a selection preference. Changed source observations clear
+this preference. One F tick drains at most 16 entries into one transaction with
+one 100 ms deadline. Full queues, writer contention and process exit discard
+hints; periodic indexed discovery remains authoritative. Shutdown does not need
+to persist disposable hints. The additive `content_hint_preferences` table joins
+by exact target version, so an old hint cannot select an asset for a new version.
+Stale auxiliary rows are pruned in bounded batches; existing v1 columns and old
+F hint readers remain compatible.
+
+After the full target SHA-256 is proven, a preferred source is included by an
+indexed point query even outside the first 16 equal-digest assets; total candidate
+count stays at 16. The preference cannot admit a different digest. A usable known
+original wins first, preserving its publication identity. Without that knowledge,
+rank verified coverage lexicographically: current xlarge variant, current large
+variant, then count of valid variants, finally asset ID. Result metadata is only
+an upper bound for skipping candidates that cannot beat verified coverage. It
+cannot establish usability. All relevant physical reads share the existing
+32 MiB budget (16 MiB reserved for selection and 16 MiB for final checks); a selected witness is checked again after reacquiring physical
+gates, before location gate and final CAS. Candidate gates are never nested.
+
+One target still binds one asset. Variants split across historical assets are
+not combined: external discovery prefers the mosaic asset, and absent variants
+follow demand generation on that asset. A known original takes priority even if
+another historical asset has additional variants. The 16-asset/16-result/32 MiB
+bounds may limit coverage; no global historical deduplication is introduced.

@@ -3,6 +3,7 @@ package cacheledger
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	dbsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/database/sqlitebusy"
 	"github.com/stretchr/testify/require"
@@ -285,4 +286,61 @@ func TestContentReusedInodeDoesNotSubstituteForDigest(t *testing.T) {
 	oldResults, e := r.ContentResults(t.Context(), old.Asset)
 	require.NoError(t, e)
 	require.ErrorIs(t, r.BindContent(t.Context(), current, oldProof, oldResults[0]), ErrStale)
+}
+
+func TestContentHintBatchAtomicAndVersionPreference(t *testing.T) {
+	r := testRepository(t)
+	ctx := t.Context()
+	v := Version{Size: 100, MtimeNS: 1, CtimeNS: 2, Dev: 1, Ino: 3, Strong: true}
+	a := ContentHint{Source: "test", Path: "/a", Version: v, EXDEV: true, PreferredAsset: "original"}
+	require.NoError(t, r.HintContentBatch(ctx, []ContentHint{a}))
+	hints, e := r.ContentHints(ctx)
+	require.NoError(t, e)
+	require.Equal(t, []ContentHint{a}, hints)
+	b := a
+	b.Version.CtimeNS++
+	b.PreferredAsset = "new-version"
+	require.NoError(t, r.HintContentBatch(ctx, []ContentHint{b}))
+	require.NoError(t, r.DropContentHint(ctx, a))
+	hints, e = r.ContentHints(ctx)
+	require.NoError(t, e)
+	require.Equal(t, []ContentHint{b}, hints)
+	require.NoError(t, r.DropContentHint(ctx, b))
+	require.Error(t, r.HintContentBatch(ctx, []ContentHint{a, {Source: "invalid"}}))
+	hints, e = r.ContentHints(ctx)
+	require.NoError(t, e)
+	require.Empty(t, hints, "whole hint batch rolls back")
+}
+
+func TestContentPreferredMatchOutsideFirstPage(t *testing.T) {
+	r := testRepository(t)
+	ctx := t.Context()
+	v := Version{Size: 100, MtimeNS: 1, CtimeNS: 2, Dev: 1, Ino: 3, Strong: true}
+	var highest string
+	p := ContentProof{Bytes: v.Size, Digest: Digest([]byte("equal bytes"))}
+	for i := range 20 {
+		ref, e := r.Resolve(ctx, "disk", fmt.Sprintf("/source-%02d", i), v)
+		require.NoError(t, e)
+		_, e = r.Publish(ctx, ref, "small", fmt.Sprintf("key-%02d", i), []byte("preview"))
+		require.NoError(t, e)
+		p.Asset = ref.Asset
+		require.NoError(t, r.ProveContent(ctx, ref, p))
+		if p.Asset > highest {
+			highest = p.Asset
+		}
+	}
+	matches, e := r.ContentMatches(ctx, p)
+	require.NoError(t, e)
+	require.Len(t, matches, 16)
+	for _, c := range matches {
+		require.NotEqual(t, highest, c.Asset)
+	}
+	matches, e = r.ContentMatches(ctx, p, highest)
+	require.NoError(t, e)
+	require.Len(t, matches, 16)
+	require.Equal(t, highest, matches[0].Asset)
+	p.Digest = Digest([]byte("different bytes"))
+	matches, e = r.ContentMatches(ctx, p, highest)
+	require.NoError(t, e)
+	require.Empty(t, matches, "preference never substitutes for full digest")
 }

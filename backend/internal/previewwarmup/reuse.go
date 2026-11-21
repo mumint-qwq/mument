@@ -195,7 +195,7 @@ func (w *ReuseWorker) scopeKey(s *scope) string {
 	data, _ := json.Marshal([]string{s.config.Source, s.sourceRoot, s.config.Directory, s.config.MountPoint})
 	return cacheledger.Digest(data)
 }
-func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.PreviewWarmupCandidate) bool {
+func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.PreviewWarmupCandidate, preferred ...string) bool {
 	if c.Guard <= 0 || c.MTimeNS > time.Now().Add(-quietFileAge).UnixNano() {
 		return false
 	}
@@ -284,7 +284,7 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 			return nil
 		}
 	}
-	out, err := w.svc.ReuseContent(ctx, iteminfo.ExtendedFileInfo{Source: s.config.Source, RealPath: full, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: filepath.Base(full), Type: c.Type, HasPreview: true}}}, g.open, stat, pace)
+	out, err := w.svc.ReuseContent(ctx, iteminfo.ExtendedFileInfo{Source: s.config.Source, RealPath: full, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: filepath.Base(full), Type: c.Type, HasPreview: true}}}, g.open, stat, pace, preferred...)
 	w.observeOutcome(out)
 	if err != nil {
 		// A vanished/replaced scope is a deferral, including failures found
@@ -314,6 +314,9 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 	return out.Bytes > 0 || out.Reason == "reused"
 }
 func (w *ReuseWorker) hints(ctx context.Context) {
+	if _, err := w.svc.FlushContentHints(ctx); err != nil {
+		w.record("hint_batch_dropped", 0)
+	}
 	hints, err := w.repo.ContentHints(ctx)
 	if err != nil {
 		w.record("hint_sql_failed", 0)
@@ -344,7 +347,7 @@ func (w *ReuseWorker) hints(ctx context.Context) {
 			}
 			info, err := os.Lstat(h.Path)
 			if err == nil && cacheledger.FromFileInfo(info) == h.Version {
-				w.processReuse(ctx, s, c)
+				w.processReuse(ctx, s, c, h.PreferredAsset)
 			} else {
 				w.record("stale_hint", 0)
 			}
