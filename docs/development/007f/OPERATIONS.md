@@ -72,3 +72,34 @@ false after restart stops F work but keeps valid C references. Rollback is to
 E3 for this candidate, with all additive tables and existing artifacts retained.
 Do not reset SQLite or copy production B data into the fixture. See
 [validation](VALIDATION.md) for the actual binary sequence and its limits.
+
+The status counters are cumulative observations, not unique image counts.
+`discovered` counts bounded index rows visited; `candidateRows` counts size-filter
+rows returned; `candidateChecks` counts exact-digest assets inspected for usable
+publications. `proofHits` means an existing exact proof avoided another original
+read, while `resumedPending` counts reacquired pending work, including retries.
+`publicationWins` counts a foreground or D publication observed after hashing;
+it does not guess which producer won. `physicalHits` is background integrity
+validation of a ready preview; real frontend consumption remains in C's hit/use
+metrics. `previewBytes` is the thumbnail validation budget charged, not a claim
+about physical disk traffic. `readBytes` records original bytes actually read,
+including cancelled/changed attempts. No counter updates cache heat.
+
+Administrator `GET /api/settings/preview-reuse?referencesAfter=` requests a
+read-only page of at most 16 proven ready assets. Follow its opaque `next`
+cursor to continue. Samples identify configured sources and source-relative old
+paths, with `live_verified_observation`, `missing_or_unreadable_unconfirmed`,
+`changed_unconfirmed`, `scope_offline`, `scope_identity_unavailable`, or
+`origin_ref_superseded`. Outside current configured scopes, paths are redacted.
+A reference or unproven-loss count of 17 is a saturated lower bound (`capped`),
+not an exact count. Pages are observations at query time, not one global atomic
+inventory. Neither absence nor a stale locator authorizes reference retirement;
+this audit never deletes, detaches or confirms a loss. Normal status and logs
+remain aggregate and contain no paths, original digests or asset identifiers.
+
+The F work key includes the current C token as well as B's index version. A
+legacy E3 writer that replaces a reference without changing the B observation
+therefore cannot cause F to skip an unproven new generation. A completed proof
+can still be reused without rereading originals. Persisted hints outside current
+scopes are removed; not-yet-indexed targets fall back to history rediscovery so
+an unavailable hint cannot indefinitely block later high-priority hints.

@@ -264,3 +264,25 @@ func TestContentSQLiteBusyDoesNotPublishPartialProof(t *testing.T) {
 	require.NoError(t, e)
 	require.NoError(t, r.ProveContent(ctx, ref, proof))
 }
+
+func TestContentReusedInodeDoesNotSubstituteForDigest(t *testing.T) {
+	r := testRepository(t)
+	v := Version{Size: 100, MtimeNS: 10, CtimeNS: 20, Dev: 1, Ino: 77, Strong: true}
+	old, e := r.Resolve(t.Context(), "disk", "/same.jpg", v)
+	require.NoError(t, e)
+	_, e = r.Publish(t.Context(), old, "small", "old-preview", []byte("old thumbnail"))
+	require.NoError(t, e)
+	oldProof := ContentProof{Asset: old.Asset, Bytes: 100, Digest: Digest([]byte("old entire original"))}
+	require.NoError(t, r.ProveContent(t.Context(), old, oldProof))
+	v.CtimeNS++ // Name, logical size, mtime, device and reused inode all collide.
+	current, e := r.Resolve(t.Context(), "disk", "/same.jpg", v)
+	require.NoError(t, e)
+	newProof := ContentProof{Asset: current.Asset, Bytes: 100, Digest: Digest([]byte("different entire original"))}
+	require.NoError(t, r.ProveContent(t.Context(), current, newProof))
+	matches, e := r.ContentMatches(t.Context(), newProof)
+	require.NoError(t, e)
+	require.Empty(t, matches)
+	oldResults, e := r.ContentResults(t.Context(), old.Asset)
+	require.NoError(t, e)
+	require.ErrorIs(t, r.BindContent(t.Context(), current, oldProof, oldResults[0]), ErrStale)
+}

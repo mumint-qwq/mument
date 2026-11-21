@@ -121,3 +121,31 @@ asset whose last variant was evicted cannot be rebound to a duplicate asset;
 this preserves its cooldown and avoids implicit historical merging. Empty assets
 from before F without this provenance stay on their ordinary demand path. No
 startup history scan attempts to manufacture unpublished provenance.
+
+## Observability and recovery refinement
+
+`content_origins` is an audit locator for the original exact reference in a
+content proof. It contains no second image metadata or generator cache. Inserts
+compare the proof origin and still-current reference; a shared target cannot
+replace the original locator. A bounded ready-asset keyset page reports whether
+the exact origin reference remains, capped reference/unproven counts, and a
+configured relative locator. The administrator reopens roots without following
+symlinks, compares existing durable pins, and observes file versions without
+reading original content. Unresolved paths and unknown mounts stay unconfirmed.
+Current source/scope filtering redacts old locations outside the enabled policy.
+
+Work claims distinguish completion, retry backoff and resumed pending state.
+Their opaque version also contains the current C asset token, detecting old E3
+reference replacement after rollback even when the B observation is unchanged.
+SQLite busy/locked is a bounded deferral, not a file I/O failure. Existing root
+pins are read-only on the hot chunk checks. Hints removed from configuration or
+not yet indexed do not block the queue; index history remains the durable
+rediscovery path. Exact proof reuse avoids repeating original reads.
+
+The long mixed test uses two real private tmpfs mounts, concurrent D/F workers,
+foreground browsing, external copies/renames, real E2 removal windows, controlled
+memory-pressure signals, wrong-volume substitution and same-volume remounts.
+Only isolated eligibility timestamps are aged to make E2 grace testable; no real
+production grace is shortened. Synthetic cgroup inputs do not prove actual
+container resource enforcement. Real process exits separately cover claiming,
+complete hash before SQL, and committed binding before work cleanup.

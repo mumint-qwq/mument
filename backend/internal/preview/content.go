@@ -21,7 +21,7 @@ type ContentOutcome struct {
 	Reason                                                                                      string
 	Bytes                                                                                       int64
 	CandidateRows, CandidateChecks, ProofHits, ReclamationDeferrals, PhysicalHits, PreviewBytes uint64
-	ForegroundWon                                                                               bool
+	PublicationWon                                                                              bool
 }
 
 // ReuseContent is background-only. It never decodes or records foreground use.
@@ -142,7 +142,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 		proof.Asset = plan.ref.Asset
 		err = s.ledger.ProveContent(ctx, plan.ref, proof)
 		out.Reason = "proven_own"
-		out.ForegroundWon = !hadOwn
+		out.PublicationWon = !hadOwn
 		return out, err
 	}
 	// Query exact digest after the one target read; unrelated same-size files

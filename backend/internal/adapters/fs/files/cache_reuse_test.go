@@ -69,14 +69,34 @@ func TestContentRealEXDEVCopyHint(t *testing.T) {
 		require.NoError(t, e)
 		expected[size] = data
 	}
+	// A pre-existing target has its own real cached generation. Copy fallback
+	// must never inherit that unrelated image when it overwrites the target.
+	oldImage := image.NewRGBA(image.Rect(0, 0, 1600, 1200))
+	_, err = rand.New(rand.NewSource(99)).Read(oldImage.Pix)
+	require.NoError(t, err)
+	for i := 3; i < len(oldImage.Pix); i += 4 {
+		oldImage.Pix[i] = 255
+	}
+	oldFile, err := os.Create(target)
+	require.NoError(t, err)
+	require.NoError(t, jpeg.Encode(oldFile, oldImage, nil))
+	require.NoError(t, oldFile.Close())
+	oldInfo := sourceInfo
+	oldInfo.Source = "reuse-b"
+	oldInfo.RealPath = target
+	oldPreview, err := preview.GetPreviewForFile(t.Context(), oldInfo, "small", "", 0)
+	require.NoError(t, err)
+	require.NotEqual(t, expected["small"], oldPreview)
 	proven, err := svc.ReuseContent(t.Context(), sourceInfo, func(context.Context) (*os.File, error) { return os.Open(source) }, func(context.Context) (os.FileInfo, error) { return os.Stat(source) }, nil)
 	require.NoError(t, err)
 	require.Equal(t, "proven_own", proven.Reason)
 	before := svc.Stats().FullDecodes
-	moves := []ResourceMove{{Source: "reuse-a", Target: "reuse-b", From: source, To: target}}
+	moves := []ResourceMove{{Source: "reuse-a", Target: "reuse-b", From: source, To: target}, {Source: "reuse-a", Target: "reuse-b", From: filepath.Join(a, "missing.jpg"), To: filepath.Join(b, "missing.jpg")}}
 	batch := NewIndexImpactBatch()
 	results := (&Service{}).moveResources(batch, moves)
 	require.NoError(t, results[0])
+	require.Error(t, results[1])
+	require.NoFileExists(t, filepath.Join(b, "missing.jpg"))
 	require.Equal(t, 2, batch.Len())
 
 	hints, err := svc.ContentLedger().ContentHints(t.Context())

@@ -38,6 +38,10 @@ record files-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimp
 if [[ -x $out/f-files-tests ]]; then
  record private-exdev env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$out/f-files-tests" -test.run '^TestContentRealEXDEVCopyHint$' -test.v
 fi
+record fileutils-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-fileutils-tests" ./internal/adapters/fs/fileutils
+if [[ -x $out/f-fileutils-tests ]]; then
+ record private-delayed-source env MUMENT_REUSE_MOUNT_TEST=1 unshare --user --map-root-user --mount --propagation private "$out/f-fileutils-tests" -test.run '^TestContentRealEXDEVDelayedSourceRemoval$' -test.v
+fi
 record preview-build env CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-preview-tests" ./internal/preview
 # E3 -> F -> E3 -> F uses the same real cache, index identities and ledger.
 mkdir "$scratch/e3" "$scratch/rollback"
@@ -52,7 +56,7 @@ if [[ -x $out/e3-preview-tests && -x $out/f-preview-tests ]]; then
  record rollback-f-return env MUMENT_REUSE_ROLLBACK_PHASE=f-return "$out/f-preview-tests" -test.run '^TestContentRollbackF$' -test.v
  cp "$scratch/rollback/state.json" "$out/rollback-state.json"
 fi
-(cd "$out" && sha256sum f-files-tests f-preview-tests e3-preview-tests) > "$out/binaries.sha256"
+(cd "$out" && sha256sum f-files-tests f-fileutils-tests f-preview-tests e3-preview-tests) > "$out/binaries.sha256"
 "$go_cmd" version -m "$out/f-preview-tests" > "$out/buildinfo.txt"
 date -Is > "$out/finished.txt"
 printf '%s\n' "$failures" > "$out/failed-stages.txt"

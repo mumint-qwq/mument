@@ -3,12 +3,15 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
 	"github.com/stretchr/testify/require"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"math/rand"
 	"os"
@@ -208,6 +211,22 @@ func TestContentPNGAndVariantIsolation(t *testing.T) {
 	out, err := reuseTestFile(t, f.s, source, nil)
 	require.NoError(t, err)
 	require.Equal(t, "proven_own", out.Reason)
+	renamed := source
+	renamed.Name = "renamed.png"
+	renamed.RealPath = filepath.Join(f.root, renamed.Name)
+	require.NoError(t, os.Rename(source.RealPath, renamed.RealPath))
+	renameDecodes := f.s.Stats().FullDecodes
+	out, err = reuseTestFile(t, f.s, renamed, nil)
+	require.NoError(t, err)
+	require.Equal(t, "reused", out.Reason)
+	for size, expected := range previews {
+		data, e := f.s.getPreviewForFile(t.Context(), renamed, size, "", 0)
+		require.NoError(t, e)
+		require.Equal(t, expected, data)
+	}
+	require.Equal(t, renameDecodes, f.s.Stats().FullDecodes)
+	source = renamed
+	path = renamed.RealPath
 	target := source
 	target.Name = "copy.png"
 	target.RealPath = filepath.Join(f.root, target.Name)
@@ -300,4 +319,113 @@ func TestContentSameSizeMiddleMismatchKeepsOwnProof(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "candidate_mismatch", out.Reason)
 	require.Zero(t, out.Bytes, "completed target proof must not be read again for candidate comparison")
+}
+
+func TestContentWaitsForActualCapacityRestore(t *testing.T) {
+	f, source, plan, bytes, when, _ := reviewIsolatedJPEG(t)
+	out, err := reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	require.Equal(t, "proven_own", out.Reason)
+	raw, err := os.ReadFile(source.RealPath)
+	require.NoError(t, err)
+	target := source
+	target.Name = "waiting.jpg"
+	target.RealPath = filepath.Join(f.root, target.Name)
+	require.NoError(t, os.WriteFile(target.RealPath, raw, 0600))
+	before := f.s.Stats().FullDecodes
+	out, err = reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "candidate_mismatch", out.Reason)
+	require.Positive(t, out.ReclamationDeferrals)
+	require.Zero(t, out.PhysicalHits)
+	require.Zero(t, out.PreviewBytes)
+	targetPlan, err := f.s.planLedgerPreview(t.Context(), target, "small")
+	require.NoError(t, err)
+	require.NotEqual(t, plan.ref.Asset, targetPlan.ref.Asset)
+	m := testCapacity(t, f, when, true)
+	require.True(t, m.space.endInventory(when, 0, diskcache.Usage{}, nil))
+	restored := m.report(t.Context(), CapacityCursor{}, true)
+	require.Equal(t, 1, restored.Reasons["capacity_restored"], "%+v", restored)
+	out, err = reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "reused", out.Reason)
+	require.Zero(t, out.Bytes, "the persisted target proof survives the isolation wait")
+	got, err := f.s.getPreviewForFile(t.Context(), target, "small", "", 0)
+	require.NoError(t, err)
+	require.Equal(t, bytes, got)
+	require.Equal(t, before, f.s.Stats().FullDecodes)
+}
+
+func TestContentEXIFOrientationIsOriginalContent(t *testing.T) {
+	f := startOrphanFixture(t)
+	source := newNoisyFile(t, f.root, "orientation-1.jpg", 1600, 1200)
+	source.Source = "orphan-test"
+	plain, err := os.ReadFile(source.RealPath)
+	require.NoError(t, err)
+	oriented := func(n int) []byte {
+		exif := makeExifOrientation(n)
+		body := append([]byte{}, plain[:2]...)
+		body = append(body, 0xff, 0xe1, byte((len(exif)+2)>>8), byte(len(exif)+2))
+		body = append(body, exif...)
+		return append(body, plain[2:]...)
+	}
+	one, six := oriented(1), oriented(6)
+	require.Equal(t, len(one), len(six))
+	require.NoError(t, os.WriteFile(source.RealPath, one, 0600))
+	initial, err := os.Stat(source.RealPath)
+	require.NoError(t, err)
+	source.ModTime = initial.ModTime()
+	old, err := f.s.getPreviewForFile(t.Context(), source, "xlarge", "", 0)
+	require.NoError(t, err)
+	out, err := reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	require.Equal(t, "proven_own", out.Reason)
+	target := source
+	target.Name = "orientation-6.jpg"
+	target.RealPath = filepath.Join(f.root, target.Name)
+	require.NoError(t, os.WriteFile(target.RealPath, six, 0600))
+	stat, err := os.Stat(source.RealPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Chtimes(target.RealPath, stat.ModTime(), stat.ModTime()))
+	out, err = reuseTestFile(t, f.s, target, nil)
+	require.NoError(t, err)
+	require.Equal(t, "candidate_mismatch", out.Reason)
+	got, err := f.s.getPreviewForFile(t.Context(), target, "xlarge", "", 0)
+	require.NoError(t, err)
+	require.NotEqual(t, old, got)
+	config, err := jpeg.DecodeConfig(bytes.NewReader(got))
+	require.NoError(t, err)
+	require.Equal(t, 768, config.Width)
+	require.Equal(t, 1024, config.Height)
+}
+
+func TestContentAncestorRenamePreservesCWithoutOriginalRead(t *testing.T) {
+	f := startOrphanFixture(t)
+	album := filepath.Join(f.root, "album")
+	require.NoError(t, os.Mkdir(album, 0700))
+	source := newNoisyFile(t, album, "photo.jpg", 1600, 1200)
+	source.Source = "orphan-test"
+	expected := map[string][]byte{}
+	for _, size := range []string{"small", "xlarge"} {
+		data, e := f.s.getPreviewForFile(t.Context(), source, size, "", 0)
+		require.NoError(t, e)
+		expected[size] = data
+	}
+	out, err := reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	require.Equal(t, "proven_own", out.Reason)
+	moved := filepath.Join(f.root, "album-old")
+	require.NoError(t, os.Rename(album, moved))
+	source.RealPath = filepath.Join(moved, "photo.jpg")
+	before := f.s.Stats().FullDecodes
+	out, err = reuseTestFile(t, f.s, source, nil)
+	require.NoError(t, err)
+	require.Equal(t, "already_proven", out.Reason)
+	require.Zero(t, out.Bytes)
+	for size, want := range expected {
+		got, e := f.s.getPreviewForFile(t.Context(), source, size, "", 0)
+		require.NoError(t, e)
+		require.Equal(t, want, got)
+	}
+	require.Equal(t, before, f.s.Stats().FullDecodes)
 }

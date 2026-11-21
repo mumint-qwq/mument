@@ -41,7 +41,7 @@ type ReuseStatus struct {
 	ReclamationDeferrals uint64            `json:"reclamationDeferrals"`
 	PhysicalHits         uint64            `json:"physicalHits"`
 	PreviewBytes         uint64            `json:"previewBytes"`
-	ForegroundWins       uint64            `json:"foregroundWins"`
+	PublicationWins      uint64            `json:"publicationWins"`
 	ResumedPending       uint64            `json:"resumedPending"`
 	Paused               bool              `json:"paused"`
 	Enabled              bool              `json:"enabled"`
@@ -367,8 +367,8 @@ func (w *ReuseWorker) observeOutcome(out preview.ContentOutcome) {
 	w.status.ReclamationDeferrals += out.ReclamationDeferrals
 	w.status.PhysicalHits += out.PhysicalHits
 	w.status.PreviewBytes += out.PreviewBytes
-	if out.ForegroundWon {
-		w.status.ForegroundWins++
+	if out.PublicationWon {
+		w.status.PublicationWins++
 	}
 }
 func reuseDeferReason(err error) string {
