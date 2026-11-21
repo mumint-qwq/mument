@@ -25,3 +25,24 @@ func contentScaleProve(t *testing.T, s *preview.Service, file iteminfo.ExtendedF
 	require.Contains(t, []string{"proven_own", "reused"}, out.Reason)
 	return out.Bytes
 }
+
+func contentScaleRetention(t *testing.T, s *preview.Service) (int, int) {
+	t.Helper()
+	retained, assets := 0, 0
+	cursor := ""
+	for {
+		page, e := s.ContentLedger().ContentRetentionPage(t.Context(), cursor)
+		require.NoError(t, e)
+		for _, r := range page {
+			assets++
+			if r.OriginReferenced {
+				retained++
+			}
+			cursor = r.Cursor
+		}
+		if len(page) < 16 {
+			break
+		}
+	}
+	return retained, assets
+}

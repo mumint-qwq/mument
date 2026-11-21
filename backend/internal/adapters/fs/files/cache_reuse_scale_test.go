@@ -113,6 +113,11 @@ func TestContentCrossMountScale(t *testing.T) {
 		require.Equal(t, digests[i], sha256.Sum256(data))
 	}
 	rereadMS := time.Since(start).Milliseconds()
+	retained, proofAssets := contentScaleRetention(t, svc)
+	if contentScaleIsF {
+		require.Equal(t, count, retained)
+		require.Equal(t, count, proofAssets)
+	}
 	delta := svc.Stats().FullDecodes - warm
 	if contentScaleIsF {
 		require.Zero(t, delta)
@@ -121,5 +126,5 @@ func TestContentCrossMountScale(t *testing.T) {
 	} else {
 		require.EqualValues(t, count, delta)
 	}
-	t.Logf("core_scale f=%t images=%d mounts=%d,%d warm_ms=%d move_ms=%d source_hash_ms=%d source_bytes=%d target_hash_ms=%d target_bytes=%d reread_ms=%d decode_delta=%d directory_intents=%d", contentScaleIsF, count, ma.Mnt_id, mb.Mnt_id, warmMS, moveMS, sourceHashMS, sourceBytes, targetHashMS, targetBytes, rereadMS, delta, batch.Len())
+	t.Logf("core_scale f=%t images=%d mounts=%d,%d warm_ms=%d move_ms=%d source_hash_ms=%d source_bytes=%d target_hash_ms=%d target_bytes=%d reread_ms=%d decode_delta=%d directory_intents=%d retained_origin_refs=%d proven_ready_assets=%d", contentScaleIsF, count, ma.Mnt_id, mb.Mnt_id, warmMS, moveMS, sourceHashMS, sourceBytes, targetHashMS, targetBytes, rereadMS, delta, batch.Len(), retained, proofAssets)
 }

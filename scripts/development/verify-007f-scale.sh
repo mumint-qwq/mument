@@ -15,6 +15,7 @@ import("testing";"github.com/gtsteffaniak/filebrowser/backend/internal/preview";
 const contentScaleIsF=false
 func contentScaleConfigure(a,b string){}
 func contentScaleProve(t *testing.T,s *preview.Service,f iteminfo.ExtendedFileInfo)int64{return 0}
+func contentScaleRetention(t *testing.T,s *preview.Service)(int,int){return 0,0}
 GO
 CGO_ENABLED=0 "$go_cmd" -C "$scratch/e3/backend" test -c -trimpath -o "$out/e3-files-tests" ./internal/adapters/fs/files
 CGO_ENABLED=0 "$go_cmd" -C "$root/backend" test -c -trimpath -o "$out/f-files-tests" ./internal/adapters/fs/files
