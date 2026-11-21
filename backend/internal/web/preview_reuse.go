@@ -2,14 +2,26 @@ package web
 
 import (
 	"encoding/json"
-	"github.com/gtsteffaniak/filebrowser/backend/internal/previewwarmup"
 	"io"
 	"net/http"
+
+	"github.com/gtsteffaniak/filebrowser/backend/internal/previewwarmup"
 )
 
 func previewReuseGet(w http.ResponseWriter, r *http.Request, _ *Context) (int, error) {
 	if runtimeDeps.PreviewReuse == nil {
 		return RenderJSON(w, r, previewwarmup.ReuseStatus{Reason: "disabled"})
+	}
+	if r.URL.Query().Has("referencesAfter") {
+		cursor := r.URL.Query().Get("referencesAfter")
+		if !previewwarmup.ValidRetentionCursor(cursor) {
+			return http.StatusBadRequest, previewwarmup.ErrInvalidAction
+		}
+		page, err := runtimeDeps.PreviewReuse.Retention(r.Context(), cursor)
+		if err != nil {
+			return http.StatusConflict, err
+		}
+		return RenderJSON(w, r, page)
 	}
 	return RenderJSON(w, r, runtimeDeps.PreviewReuse.Snapshot())
 }

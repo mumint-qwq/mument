@@ -6,10 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
-	"github.com/gtsteffaniak/filebrowser/backend/internal/previewwarmup"
-	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
-	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +14,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/previewwarmup"
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPreviewReuseAdminStatusAndPause(t *testing.T) {
@@ -122,5 +123,20 @@ func TestPreviewReuseFourThousandListingDoesNotHash(t *testing.T) {
 	require.Zero(t, worker.Snapshot().ReadBytes)
 	release()
 	require.Eventually(t, func() bool { return worker.Snapshot().Counts["proven_own"] == 1 }, 10*time.Second, 100*time.Millisecond, "status=%+v", worker.Snapshot())
+	previous := runtimeDeps.PreviewReuse
+	runtimeDeps.PreviewReuse = worker
+	t.Cleanup(func() { runtimeDeps.PreviewReuse = previous })
+	auditRec := httptest.NewRecorder()
+	auditCode, auditErr := previewReuseGet(auditRec, httptest.NewRequest(http.MethodGet, "/api/settings/preview-reuse?referencesAfter=", nil), &Context{User: env.user})
+	require.NoError(t, auditErr)
+	require.Equal(t, http.StatusOK, auditCode)
+	var audit previewwarmup.RetentionPage
+	require.NoError(t, json.Unmarshal(auditRec.Body.Bytes(), &audit))
+	require.EqualValues(t, 1, audit.Reasons["live_verified_observation"])
+	require.Equal(t, "/Pictures/000-image.jpg", audit.Samples[0].Path)
+	require.NotContains(t, auditRec.Body.String(), env.root)
+	badCode, badErr := previewReuseGet(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/settings/preview-reuse?referencesAfter=/bad", nil), &Context{User: env.user})
+	require.Error(t, badErr)
+	require.Equal(t, http.StatusBadRequest, badCode)
 	t.Logf("in-process handlers: entries=4000 pages=%d ordinary_ms=%.3f paged_total_ms=%d first_preview_ms=%d F_original_bytes_during_GET=0 resumed_bytes=%d", pages, ordinaryMS, pagedMS, firstMS, worker.Snapshot().ReadBytes)
 }

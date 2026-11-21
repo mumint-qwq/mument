@@ -2,21 +2,24 @@ package previewwarmup
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
-	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
-	indexsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
-	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
-	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
-	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
-	"github.com/gtsteffaniak/go-logger/logger"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gtsteffaniak/filebrowser/backend/internal/adapters/fs/diskcache"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/cacheledger"
+	indexsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/database/sqlitebusy"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/preview"
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
+	"github.com/gtsteffaniak/go-logger/logger"
 )
 
 type ReuseWorker struct {
@@ -31,11 +34,20 @@ type ReuseWorker struct {
 	status ReuseStatus
 }
 type ReuseStatus struct {
-	Paused    bool              `json:"paused"`
-	Enabled   bool              `json:"enabled"`
-	Reason    string            `json:"reason"`
-	ReadBytes int64             `json:"readBytes"`
-	Counts    map[string]uint64 `json:"counts"`
+	Discovered           uint64            `json:"discovered"`
+	CandidateRows        uint64            `json:"candidateRows"`
+	CandidateChecks      uint64            `json:"candidateChecks"`
+	ProofHits            uint64            `json:"proofHits"`
+	ReclamationDeferrals uint64            `json:"reclamationDeferrals"`
+	PhysicalHits         uint64            `json:"physicalHits"`
+	PreviewBytes         uint64            `json:"previewBytes"`
+	ForegroundWins       uint64            `json:"foregroundWins"`
+	ResumedPending       uint64            `json:"resumedPending"`
+	Paused               bool              `json:"paused"`
+	Enabled              bool              `json:"enabled"`
+	Reason               string            `json:"reason"`
+	ReadBytes            int64             `json:"readBytes"`
+	Counts               map[string]uint64 `json:"counts"`
 }
 
 func NewReuse(ctx context.Context, server settings.Server, db *indexsql.IndexDB, svc *preview.Service) *ReuseWorker {
@@ -116,6 +128,9 @@ func (w *ReuseWorker) allow(ctx context.Context) error {
 		return preview.ErrPreviewBusy
 	}
 	if err := w.svc.ContentCacheReady(ctx); err != nil {
+		if sqlitebusy.IsBusyOrLocked(err) {
+			return err
+		}
 		return errScopeOffline
 	}
 	if err := w.svc.WarmupSpace(); err != nil {
@@ -140,7 +155,7 @@ func (w *ReuseWorker) run(ctx context.Context) {
 			_ = w.repo.PruneContentWork(ctx)
 		case <-tick.C:
 			if err := w.allow(ctx); err != nil {
-				w.record("resource_deferred", 0)
+				w.record(reuseDeferReason(err), 0)
 				continue
 			}
 			if turn%2 == 0 {
@@ -158,6 +173,9 @@ func (w *ReuseWorker) run(ctx context.Context) {
 				s.cursor = ""
 				continue
 			}
+			w.mu.Lock()
+			w.status.Discovered += uint64(len(page))
+			w.mu.Unlock()
 			for _, c := range page {
 				if ctx.Err() != nil {
 					return
@@ -199,6 +217,7 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 		return false
 	}
 	proof := source.Proof
+	observed := cacheledger.FromFileInfo(source.Info)
 	source.Close()
 	if err = proof.Check(); err != nil {
 		w.record("source_identity_unavailable", 0)
@@ -209,13 +228,32 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 		w.record("scope_identity_changed", 0)
 		return true
 	}
-	claim, err := w.repo.ContentWork(ctx, key, c.Path, c.Version)
+	// Work completion also includes the C token: an E3 writer may replace a
+	// reference without changing the indexed file observation after rollback.
+	ns, name, ok := cacheledger.Location(s.sourceRoot, full)
+	if !ok {
+		w.record("source_unavailable", 0)
+		return false
+	}
+	ref, err := w.repo.FindRef(ctx, ns, name, observed)
 	if err != nil {
 		w.record("work_sql_failed", 0)
 		return true
 	}
-	if !claim {
+	jobVersion := c.Version + "|asset:" + ref.Asset
+	claim, err := w.repo.ClaimContentWork(ctx, key, c.Path, jobVersion)
+	if err != nil {
+		w.record("work_sql_failed", 0)
+		return true
+	}
+	if !claim.Claimed {
+		w.record(claim.Reason, 0)
 		return false
+	}
+	if claim.Resumed {
+		w.mu.Lock()
+		w.status.ResumedPending++
+		w.mu.Unlock()
 	}
 	g := guardedFile{scope: s, relative: rel, version: c.Version, claimedIdentity: id}
 	stat := func(ctx context.Context) (os.FileInfo, error) {
@@ -247,6 +285,7 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 		}
 	}
 	out, err := w.svc.ReuseContent(ctx, iteminfo.ExtendedFileInfo{Source: s.config.Source, RealPath: full, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: filepath.Base(full), Type: c.Type, HasPreview: true}}}, g.open, stat, pace)
+	w.observeOutcome(out)
 	if err != nil {
 		// A vanished/replaced scope is a deferral, including failures found
 		// after the fd read. It must not exhaust a file's I/O retry budget.
@@ -256,20 +295,20 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 			}
 		}
 		switch {
-		case ctx.Err() != nil, errors.Is(err, preview.ErrPreviewBusy), errors.Is(err, errScopeOffline), errors.Is(err, errIndexNotReady), errors.Is(err, errCPUThrottled), errors.Is(err, errMemoryPressure), errors.Is(err, errPressureUnavailable), errors.Is(err, errLowSpace), errors.Is(err, diskcache.ErrReclaimScope), preview.IsSpaceDeferred(err):
-			_ = w.repo.DeferContentWork(ctx, key, c.Path, c.Version)
-			w.record("resource_deferred", out.Bytes)
+		case ctx.Err() != nil, sqlitebusy.IsBusyOrLocked(err), errors.Is(err, sqlitebusy.ErrBusy), errors.Is(err, preview.ErrPreviewBusy), errors.Is(err, errScopeOffline), errors.Is(err, errIndexNotReady), errors.Is(err, errCPUThrottled), errors.Is(err, errMemoryPressure), errors.Is(err, errPressureUnavailable), errors.Is(err, errLowSpace), errors.Is(err, diskcache.ErrReclaimScope), preview.IsSpaceDeferred(err):
+			_ = w.repo.DeferContentWork(ctx, key, c.Path, jobVersion)
+			w.record(reuseDeferReason(err), out.Bytes)
 		default:
-			_ = w.repo.FinishContentWork(ctx, key, c.Path, c.Version, false)
+			_ = w.repo.FinishContentWork(ctx, key, c.Path, jobVersion, false)
 			w.record("retry", out.Bytes)
 		}
 		return true
 	}
 	switch out.Reason {
 	case "no_old_proof", "candidate_mismatch":
-		_ = w.repo.DeferContentWork(ctx, key, c.Path, c.Version)
+		_ = w.repo.DeferContentWork(ctx, key, c.Path, jobVersion)
 	default:
-		_ = w.repo.FinishContentWork(ctx, key, c.Path, c.Version, true)
+		_ = w.repo.FinishContentWork(ctx, key, c.Path, jobVersion, true)
 	}
 	w.record(out.Reason, out.Bytes)
 	return out.Bytes > 0 || out.Reason == "reused"
@@ -277,9 +316,14 @@ func (w *ReuseWorker) processReuse(ctx context.Context, s *scope, c indexsql.Pre
 func (w *ReuseWorker) hints(ctx context.Context) {
 	hints, err := w.repo.ContentHints(ctx)
 	if err != nil {
+		w.record("hint_sql_failed", 0)
 		return
 	}
 	for _, h := range hints {
+		if ctx.Err() != nil || !w.svc.IdleForWarmup() || w.paused.Load() {
+			return
+		}
+		matched := false
 		for i := range w.scopes {
 			s := &w.scopes[i]
 			if s.config.Source != h.Source {
@@ -289,17 +333,68 @@ func (w *ReuseWorker) hints(ctx context.Context) {
 			if err != nil || !filepath.IsLocal(rel) || !settings.WarmupContains(s.config.Directory, rel) {
 				continue
 			}
+			matched = true
 			c, err := w.db.PreviewContentExact(ctx, h.Source, "/"+filepath.ToSlash(rel))
 			if err != nil {
-				continue
+				if errors.Is(err, sql.ErrNoRows) {
+					_ = w.repo.DropContentHint(ctx, h)
+					w.record("hint_rediscovery", 0)
+				}
+				break // A lost index hint is recovered by the normal bounded history lane.
 			}
 			info, err := os.Lstat(h.Path)
 			if err == nil && cacheledger.FromFileInfo(info) == h.Version {
 				w.processReuse(ctx, s, c)
+			} else {
+				w.record("stale_hint", 0)
 			}
 			_ = w.repo.DropContentHint(ctx, h)
 			return
 		}
+		if !matched {
+			_ = w.repo.DropContentHint(ctx, h)
+			w.record("out_of_scope_hint", 0)
+		}
+	}
+}
+
+func (w *ReuseWorker) observeOutcome(out preview.ContentOutcome) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.status.CandidateRows += out.CandidateRows
+	w.status.CandidateChecks += out.CandidateChecks
+	w.status.ProofHits += out.ProofHits
+	w.status.ReclamationDeferrals += out.ReclamationDeferrals
+	w.status.PhysicalHits += out.PhysicalHits
+	w.status.PreviewBytes += out.PreviewBytes
+	if out.ForegroundWon {
+		w.status.ForegroundWins++
+	}
+}
+func reuseDeferReason(err error) string {
+	switch {
+	case sqlitebusy.IsBusyOrLocked(err), errors.Is(err, sqlitebusy.ErrBusy):
+		return "sql_busy"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "cancelled"
+	case errors.Is(err, preview.ErrPreviewBusy):
+		return "foreground_or_pause"
+	case errors.Is(err, errScopeOffline), errors.Is(err, diskcache.ErrReclaimScope):
+		return "scope_offline"
+	case errors.Is(err, errIndexNotReady):
+		return "index_not_ready"
+	case errors.Is(err, errCPUThrottled):
+		return "cpu_throttled"
+	case errors.Is(err, errMemoryPressure):
+		return "memory_pressure"
+	case errors.Is(err, errPressureUnavailable):
+		return "pressure_metrics_unavailable"
+	case errors.Is(err, errLowSpace):
+		return "low_cache_space"
+	case preview.IsSpaceDeferred(err):
+		return "space_deferred"
+	default:
+		return "resource_deferred"
 	}
 }
 

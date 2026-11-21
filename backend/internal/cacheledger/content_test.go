@@ -2,6 +2,9 @@ package cacheledger
 
 import (
 	"context"
+	"database/sql"
+	dbsql "github.com/gtsteffaniak/filebrowser/backend/internal/database/sql"
+	"github.com/gtsteffaniak/filebrowser/backend/internal/database/sqlitebusy"
 	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
@@ -130,9 +133,10 @@ func TestContentWorkRestartAndScopeIdentity(t *testing.T) {
 	r, err = Open(path)
 	require.NoError(t, err)
 	defer r.Close()
-	yes, err = r.ContentWork(t.Context(), "scope", "/a", "v1")
+	claim, err := r.ClaimContentWork(t.Context(), "scope", "/a", "v1")
 	require.NoError(t, err)
-	require.True(t, yes, "pending hashes restart")
+	require.True(t, claim.Claimed)
+	require.True(t, claim.Resumed, "pending work survives reopen")
 	require.NoError(t, r.FinishContentWork(t.Context(), "scope", "/a", "v1", true))
 	yes, err = r.ContentWork(t.Context(), "scope", "/a", "v1")
 	require.NoError(t, err)
@@ -202,4 +206,61 @@ func TestContentNeverRebindsPreviouslyPublishedEmptyAsset(t *testing.T) {
 	targetProof.Asset = fresh.Asset
 	require.NoError(t, r.ProveContent(t.Context(), fresh, targetProof))
 	require.NoError(t, r.BindContent(t.Context(), fresh, proof, results[0]))
+}
+
+func TestContentClaimRecoveryReasons(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger")
+	r, e := Open(path)
+	require.NoError(t, e)
+	c, e := r.ClaimContentWork(t.Context(), "scope", "/photo", "v1")
+	require.NoError(t, e)
+	require.True(t, c.Claimed)
+	require.False(t, c.Resumed)
+	require.NoError(t, r.Close())
+	r, e = Open(path)
+	require.NoError(t, e)
+	defer r.Close()
+	c, e = r.ClaimContentWork(t.Context(), "scope", "/photo", "v1")
+	require.NoError(t, e)
+	require.True(t, c.Claimed)
+	require.True(t, c.Resumed)
+	require.NoError(t, r.DeferContentWork(t.Context(), "scope", "/photo", "v1"))
+	c, e = r.ClaimContentWork(t.Context(), "scope", "/photo", "v1")
+	require.NoError(t, e)
+	require.False(t, c.Claimed)
+	require.Equal(t, "retry_backoff", c.Reason)
+	require.NoError(t, r.FinishContentWork(t.Context(), "scope", "/photo", "v1", true))
+	c, e = r.ClaimContentWork(t.Context(), "scope", "/photo", "v1")
+	require.NoError(t, e)
+	require.False(t, c.Claimed)
+	require.Equal(t, "completed", c.Reason)
+}
+
+func TestContentSQLiteBusyDoesNotPublishPartialProof(t *testing.T) {
+	r := testRepository(t)
+	ctx := t.Context()
+	v := Version{Size: 100, MtimeNS: 1, CtimeNS: 2, Dev: 1, Ino: 3, Strong: true}
+	ref, e := r.Resolve(ctx, "disk", "/source", v)
+	require.NoError(t, e)
+	var dbPath string
+	var seq int
+	var name string
+	require.NoError(t, r.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &dbPath))
+	other, e := sql.Open(dbsql.SqliteDriver, dbPath)
+	require.NoError(t, e)
+	defer other.Close()
+	other.SetMaxOpenConns(1)
+	_, e = other.Exec("BEGIN IMMEDIATE")
+	require.NoError(t, e)
+	proof := ContentProof{Asset: ref.Asset, Bytes: 100, Digest: Digest([]byte("original"))}
+	start := time.Now()
+	e = r.ProveContent(ctx, ref, proof)
+	require.True(t, sqlitebusy.IsBusyOrLocked(e), "%v", e)
+	require.Less(t, time.Since(start), 3*time.Second)
+	known, e := r.ContentProof(ctx, ref)
+	require.NoError(t, e)
+	require.False(t, known)
+	_, e = other.Exec("COMMIT")
+	require.NoError(t, e)
+	require.NoError(t, r.ProveContent(ctx, ref, proof))
 }

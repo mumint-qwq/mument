@@ -18,8 +18,10 @@ import (
 func (s *Service) ContentLedger() *cacheledger.Repository { return s.ledger }
 
 type ContentOutcome struct {
-	Reason string
-	Bytes  int64
+	Reason                                                                                      string
+	Bytes                                                                                       int64
+	CandidateRows, CandidateChecks, ProofHits, ReclamationDeferrals, PhysicalHits, PreviewBytes uint64
+	ForegroundWon                                                                               bool
 }
 
 // ReuseContent is background-only. It never decodes or records foreground use.
@@ -45,10 +47,12 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 	if err != nil {
 		return out, err
 	}
+	out.CandidateRows = uint64(len(candidates))
 	own, err := s.ledger.ContentResults(ctx, plan.ref.Asset)
 	if err != nil {
 		return out, err
 	}
+	hadOwn := len(own) > 0
 	if len(own) == 0 && len(candidates) == 0 {
 		return out, nil
 	}
@@ -59,7 +63,8 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 		}
 		if yes {
 			out.Reason = "already_proven"
-			return out, nil
+			out.ProofHits = 1
+			return out, s.ledger.NoteContentOrigin(ctx, plan.ref, file.Source, plan.path)
 		}
 	}
 	// Only useful versions get a C token. A proof is never assigned to a token
@@ -71,6 +76,9 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 	proof, known, err := s.ledger.KnownContent(ctx, plan.ref)
 	if err != nil {
 		return out, err
+	}
+	if known {
+		out.ProofHits = 1
 	}
 	if !known {
 		f, e := open(ctx)
@@ -108,6 +116,9 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 	if err == nil {
 		proof.Asset = plan.ref.Asset
 		err = s.ledger.ProveContent(ctx, plan.ref, proof)
+		if err == nil {
+			err = s.ledger.NoteContentOrigin(ctx, plan.ref, file.Source, plan.path)
+		}
 	}
 	release()
 	if err != nil {
@@ -131,6 +142,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 		proof.Asset = plan.ref.Asset
 		err = s.ledger.ProveContent(ctx, plan.ref, proof)
 		out.Reason = "proven_own"
+		out.ForegroundWon = !hadOwn
 		return out, err
 	}
 	// Query exact digest after the one target read; unrelated same-size files
@@ -147,6 +159,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 	defer s.warmupRequest.Store(false)
 	remainingPreviewBytes := int64(32 << 20)
 	for _, candidate := range candidates {
+		out.CandidateChecks++
 		results, err := s.ledger.ContentResults(ctx, candidate.Asset)
 		if err != nil {
 			return out, err
@@ -168,9 +181,11 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 				return out, e
 			}
 			if pending {
+				out.ReclamationDeferrals++
 				continue
 			}
 			remainingPreviewBytes -= p.Size
+			out.PreviewBytes += uint64(p.Size)
 			var data []byte
 			var found bool
 			if sized, ok := s.fileCache.(interface {
@@ -182,6 +197,7 @@ func (s *Service) ReuseContent(ctx context.Context, file iteminfo.ExtendedFileIn
 			}
 			if err == nil && found && p.Matches(data) {
 				witness = p
+				out.PhysicalHits++
 				break
 			}
 		}

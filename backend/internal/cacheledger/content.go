@@ -39,6 +39,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS content_published_update AFTER UPDATE ON results BEGIN
  DELETE FROM content_empty WHERE asset=NEW.asset;
 END;
+CREATE TABLE IF NOT EXISTS content_origins (
+ asset TEXT PRIMARY KEY REFERENCES content_proofs(asset), source_name TEXT NOT NULL, full_path TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS content_scopes (scope TEXT PRIMARY KEY, identity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS content_work (
  scope TEXT NOT NULL, path TEXT NOT NULL, version TEXT NOT NULL,
@@ -65,11 +67,20 @@ func (r *Repository) BindContentScope(ctx context.Context, scope, identity strin
 	if scope == "" || identity == "" {
 		return ErrStale
 	}
-	_, err := r.db.ExecContext(ctx, "INSERT OR IGNORE INTO content_scopes VALUES(?,?)", scope, identity)
-	if err != nil {
+	var old string
+	err := r.db.QueryRowContext(ctx, "SELECT identity FROM content_scopes WHERE scope=?", scope).Scan(&old)
+	if err == nil {
+		if old != identity {
+			return ErrStale
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	var old string
+	if _, err = r.db.ExecContext(ctx, "INSERT OR IGNORE INTO content_scopes VALUES(?,?)", scope, identity); err != nil {
+		return err
+	}
 	if err = r.db.QueryRowContext(ctx, "SELECT identity FROM content_scopes WHERE scope=?", scope).Scan(&old); err != nil {
 		return err
 	}
@@ -194,21 +205,40 @@ func (r *Repository) BindContent(ctx context.Context, ref Ref, p ContentProof, w
 // ContentWork coalesces the current indexed version at one path. Pending rows
 // survive process exit. Completed rows are skipped; failed reads have a fixed
 // attempt budget, while resource/offline deferrals are not recorded as failures.
+type ContentClaim struct {
+	Claimed, Resumed bool
+	Reason           string
+}
+
 func (r *Repository) ContentWork(ctx context.Context, scope, path, version string) (bool, error) {
+	c, err := r.ClaimContentWork(ctx, scope, path, version)
+	return c.Claimed, err
+}
+func (r *Repository) ClaimContentWork(ctx context.Context, scope, path, version string) (ContentClaim, error) {
 	var old, state string
 	var attempts, retry int64
 	err := r.db.QueryRowContext(ctx, `SELECT version,state,attempts,retry_at FROM content_work WHERE scope=? AND path=?`, scope, path).Scan(&old, &state, &attempts, &retry)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
+		return ContentClaim{}, err
 	}
-	if err == nil && old == version && (state == "done" || attempts >= 3 || retry > time.Now().Unix()) {
-		return false, nil
+	claim := ContentClaim{Claimed: true}
+	if err == nil && old == version {
+		switch {
+		case state == "done":
+			return ContentClaim{Reason: "completed"}, nil
+		case attempts >= 3:
+			return ContentClaim{Reason: "terminal"}, nil
+		case retry > time.Now().Unix():
+			return ContentClaim{Reason: "retry_backoff"}, nil
+		}
+		claim.Resumed = state == "pending"
 	}
 	_, err = r.db.ExecContext(ctx, `INSERT INTO content_work VALUES(?,?,?,0,0,'pending',?) ON CONFLICT(scope,path) DO UPDATE SET
  version=excluded.version,attempts=CASE WHEN version=excluded.version THEN attempts ELSE 0 END,
  retry_at=CASE WHEN version=excluded.version THEN retry_at ELSE 0 END,state='pending',updated=excluded.updated`, scope, path, version, time.Now().Unix())
-	return err == nil, err
+	return claim, err
 }
+
 func (r *Repository) FinishContentWork(ctx context.Context, scope, path, version string, done bool) error {
 	state := "pending"
 	if done {
@@ -304,4 +334,59 @@ func (r *Repository) KnownContent(ctx context.Context, ref Ref) (ContentProof, b
 func (r *Repository) DeferContentWork(ctx context.Context, scope, path, version string) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE content_work SET retry_at=?,updated=? WHERE scope=? AND path=? AND version=?`, time.Now().Add(time.Minute).Unix(), time.Now().Unix(), scope, path, version)
 	return err
+}
+
+// NoteContentOrigin records only the exact original observation that established
+// a proof. It is an audit locator, never authority to retire a missing reference.
+func (r *Repository) NoteContentOrigin(ctx context.Context, ref Ref, sourceName, fullPath string) error {
+	if !validPath(sourceName, fullPath) {
+		return ErrStale
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT OR IGNORE INTO content_origins
+ SELECT p.asset,?,? FROM content_proofs p JOIN refs f ON f.asset=p.asset
+ WHERE p.asset=? AND p.source=? AND p.path=? AND p.version=? AND f.source=? AND f.path=? AND f.version=?`,
+		sourceName, fullPath, ref.Asset, ref.Source, ref.Path, versionKey(ref.Version), ref.Source, ref.Path, versionKey(ref.Version))
+	return err
+}
+func (r *Repository) ContentScopeMatches(ctx context.Context, scope, identity string) (bool, error) {
+	var yes bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM content_scopes WHERE scope=? AND identity=?)`, scope, identity).Scan(&yes)
+	return yes, err
+}
+
+type ContentRetention struct {
+	Cursor, SourceName, FullPath string
+	Ref                          Ref
+	OriginReferenced             bool
+	References, Unproven         int
+}
+
+// A ready-asset keyset page visits at most 16 proofs. Each count is capped at 17
+// and must be presented as a lower bound when saturated. No history scan.
+func (r *Repository) ContentRetentionPage(ctx context.Context, after string) ([]ContentRetention, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT q.asset,p.source,p.path,p.version,
+ COALESCE(o.source_name,''),COALESCE(o.full_path,''),
+ EXISTS(SELECT 1 FROM refs WHERE source=p.source AND path=p.path AND version=p.version AND asset=p.asset),
+ (SELECT count(*) FROM (SELECT 1 FROM refs WHERE asset=p.asset LIMIT 17)),
+ (SELECT count(*) FROM (SELECT 1 FROM orphan_unproven_refs WHERE asset=p.asset LIMIT 17))
+ FROM content_ready q JOIN content_proofs p ON p.asset=q.asset LEFT JOIN content_origins o ON o.asset=q.asset
+ WHERE q.asset>? ORDER BY q.asset LIMIT 16`, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var page []ContentRetention
+	for rows.Next() {
+		var r ContentRetention
+		var v string
+		if err = rows.Scan(&r.Cursor, &r.Ref.Source, &r.Ref.Path, &v, &r.SourceName, &r.FullPath, &r.OriginReferenced, &r.References, &r.Unproven); err != nil {
+			return nil, err
+		}
+		r.Ref.Asset = r.Cursor
+		if err = json.Unmarshal([]byte(v), &r.Ref.Version); err != nil {
+			return nil, err
+		}
+		page = append(page, r)
+	}
+	return page, rows.Err()
 }

@@ -35,3 +35,7 @@ func ObserveSourceDirectory(context.Context, string, string, int) (*SourceDirect
 func (*SourceDirectory) Contains(string, os.FileInfo) bool { return false }
 func (*SourceDirectory) Removed() bool                     { return false }
 func (*SourceObservation) LostLink() bool                  { return false }
+
+func SourceRootIdentity(string) (DirectoryIdentity, error) {
+	return DirectoryIdentity{}, ErrDurableIdentity
+}
