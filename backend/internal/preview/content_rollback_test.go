@@ -46,4 +46,9 @@ func TestContentRollbackF(t *testing.T) {
 		}
 	}
 	require.Equal(t, before, s.Stats().FullDecodes)
+	fRollbackWrite(t, dir, state)
+	if phase == "f-return" {
+		require.NotEqual(t, state.FirstIndex, state.CurrentIndex)
+	}
+
 }
