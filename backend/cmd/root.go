@@ -175,7 +175,7 @@ func StartFilebrowser() {
 	}
 
 	if warmupDrainErr != nil {
-		logger.Errorf("preview warmup did not drain: %v (leaving preview service, ledger, index database and caches open)", warmupDrainErr)
+		logger.Errorf("preview background workers did not drain: %v (leaving preview service, ledger, index database and caches open)", warmupDrainErr)
 		return
 	}
 
@@ -285,15 +285,17 @@ func rootCMD(ctx context.Context, serverConfig *settings.Server, a *app.App, shu
 
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	defer cancelWorker()
+	reuse := previewwarmup.NewReuse(workerCtx, *serverConfig, indexing.GetIndexDB(), preview.GetService())
 	warmup := previewwarmup.New(workerCtx, *serverConfig, indexing.GetIndexDB(), preview.GetService())
 	web.StartHttp(ctx, web.Deps{
 		Store:         a.Store,
 		Files:         a.Files,
 		Auth:          a.Auth,
 		PreviewWarmup: warmup,
+		PreviewReuse:  reuse,
 	}, shutdownComplete)
 	cancelWorker()
 	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelDrain()
-	return warmup.Wait(drainCtx)
+	return errors.Join(warmup.Wait(drainCtx), reuse.Wait(drainCtx))
 }

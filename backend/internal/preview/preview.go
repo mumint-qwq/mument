@@ -50,6 +50,7 @@ type Service struct {
 	orphans        *orphanManager
 	space          *spaceManager
 	capacity       *capacityManager
+	contentHints   chan cacheledger.ContentHint
 	recoveryDone   chan struct{}
 	ledgerClose    sync.Once
 	ledgerCloseErr error
@@ -146,6 +147,7 @@ func newPreviewGenerator(concurrencyLimit, memoryBudgetMB int, cacheDir string, 
 	taskLimit := newTaskLimiter(previewTaskSlots(concurrencyLimit), stats)
 	svc := &Service{
 		fileCache:     fileCache,
+		contentHints:  make(chan cacheledger.ContentHint, 256),
 		cacheDir:      actualCacheDir,
 		debug:         settings.Config.Integrations.Media.Debug,
 		ffmpegService: ffmpegService,

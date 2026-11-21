@@ -56,3 +56,18 @@ func validatePreviewWarmup(server Server) error {
 	}
 	return nil
 }
+
+// F uses the same scope grammar but an independent switch and durable cache.
+func validatePreviewReuse(server Server) error {
+	if !server.PreviewReuse.Enabled {
+		return nil
+	}
+	if server.CacheDir == "" {
+		return fmt.Errorf("server.previewReuse requires an explicit persistent cacheDir")
+	}
+	server.PreviewWarmup = server.PreviewReuse
+	if err := validatePreviewWarmup(server); err != nil {
+		return fmt.Errorf("server.previewReuse: %w", err)
+	}
+	return nil
+}

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,7 +23,9 @@ import (
 	"github.com/gtsteffaniak/filebrowser/backend/internal/state"
 	"github.com/gtsteffaniak/filebrowser/backend/internal/utils"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing"
+	"github.com/gtsteffaniak/filebrowser/backend/pkg/indexing/iteminfo"
 	"github.com/gtsteffaniak/filebrowser/backend/pkg/settings"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -129,14 +130,20 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 	publicRoutes := http.NewServeMux()
 	publicApi := http.NewServeMux()
 	configureHTTPRouter(router, api, publicRoutes, publicApi)
-	srv := httptest.NewServer(router)
-	client := &http.Client{Timeout: 30 * time.Second}
+	srv := newMoveHTTPServer(router)
+	client := srv.client
+	client.Timeout = 30 * time.Second
+	if os.Getenv("MUMENT_MOVE_HANDLER_TRANSPORT") == "1" {
+		t.Log("transport=in-process handler; real share middleware, no listening socket")
+	} else {
+		t.Log("transport=loopback TCP")
+	}
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_ = files.WaitForIndexMaintenance(ctx)
 		cancel()
-		srv.Close()
+		srv.close()
 		previewCtx, cancelPreview := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := preview.Shutdown(previewCtx); err != nil {
 			t.Error(err)
@@ -166,6 +173,25 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 		return resp.StatusCode, data
+	}
+	if os.Getenv("MUMENT_REUSE_SHARE_FIXTURE") == "1" {
+		source := filepath.Join(root, "outside.jpg")
+		target := filepath.Join(shared, "a", "x.jpg")
+		bytes, e := os.ReadFile(target)
+		require.NoError(t, e)
+		require.NoError(t, os.WriteFile(source, bytes, 0600))
+		makeInfo := func(path string) iteminfo.ExtendedFileInfo {
+			return iteminfo.ExtendedFileInfo{Source: "srv", RealPath: path, FileInfo: iteminfo.FileInfo{ItemInfo: iteminfo.ItemInfo{Name: filepath.Base(path), Type: "image/jpeg", HasPreview: true}}}
+		}
+		_, e = preview.GetPreviewForFile(t.Context(), makeInfo(source), "small", "", 0)
+		require.NoError(t, e)
+		verify := func(path string) preview.ContentOutcome {
+			out, e := preview.GetService().ReuseContent(t.Context(), makeInfo(path), func(context.Context) (*os.File, error) { return os.Open(path) }, func(context.Context) (os.FileInfo, error) { return os.Stat(path) }, nil)
+			require.NoError(t, e)
+			return out
+		}
+		require.Equal(t, "proven_own", verify(source).Reason)
+		require.Equal(t, "reused", verify(target).Reason)
 	}
 	status, previewBefore := getPreview("a/x.jpg")
 	if status != http.StatusOK {
@@ -255,4 +281,10 @@ func TestPublicShareMoveOverRealHTTP(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "escape.jpg")); err == nil {
 		t.Fatal("path traversal wrote outside the share")
 	}
+}
+
+func TestContentPublicShareKeepsTargetAuthorization(t *testing.T) {
+	t.Setenv("MUMENT_MOVE_HANDLER_TRANSPORT", "1")
+	t.Setenv("MUMENT_REUSE_SHARE_FIXTURE", "1")
+	TestPublicShareMoveOverRealHTTP(t)
 }

@@ -67,14 +67,19 @@ func MoveFile(src, dst string) error {
 }
 
 // MoveByCopy retains the asynchronous source deletion after a successful copy.
+// Captured per operation; production always uses os.RemoveAll. Tests can hold
+// only the existing asynchronous removal without changing copy/move results.
+var removeMovedSource = os.RemoveAll
+
 func MoveByCopy(src, dst string) error {
+	removeSource := removeMovedSource
 	if err := CopyFile(src, dst); err != nil {
 		logger.Errorf("CopyFile failed %v", err)
 		return err
 	}
 
 	go func() {
-		if err := os.RemoveAll(src); err != nil {
+		if err := removeSource(src); err != nil {
 			logger.Errorf("os.Remove failed %v", err)
 		}
 	}()

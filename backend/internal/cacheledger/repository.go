@@ -90,7 +90,7 @@ func Open(path string) (*Repository, error) {
 	if err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	if _, err = tx.Exec(schema + orphanSchema + capacitySchema + capacityCooldownSchema); err != nil {
+	if _, err = tx.Exec(schema + orphanSchema + capacitySchema + capacityCooldownSchema + contentSchema); err != nil {
 		return nil, errors.Join(err, tx.Rollback(), db.Close())
 	}
 	if err = initOrphanIntents(tx); err != nil {

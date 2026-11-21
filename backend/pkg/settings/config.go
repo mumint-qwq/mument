@@ -83,6 +83,9 @@ func initializeConfig(configFile string, cliMode bool) {
 	if err := validatePreviewWarmup(Config.Server); err != nil {
 		logger.Fatal(err.Error())
 	}
+	if err := validatePreviewReuse(Config.Server); err != nil {
+		logger.Fatal(err.Error())
+	}
 	InitializeUserResolvers() // Initialize user package resolvers after sources are set up
 	setupUrls()
 	if cliMode {

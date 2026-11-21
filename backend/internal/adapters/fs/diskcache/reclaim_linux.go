@@ -666,3 +666,21 @@ func (o *SourceObservation) LostLink() bool {
 	var st unix.Stat_t
 	return unix.Fstat(int(o.file.Fd()), &st) == nil && uint64(st.Nlink)+1 == o.links
 }
+
+// SourceRootIdentity observes a configured directory without traversing children
+// or reading original bytes. A caller must compare a previously pinned identity.
+func SourceRootIdentity(path string) (DirectoryIdentity, error) {
+	fd, err := openDirectoryPath(path)
+	if err != nil {
+		return DirectoryIdentity{}, err
+	}
+	defer unix.Close(fd)
+	id, err := directoryIdentity(fd)
+	if err != nil {
+		return DirectoryIdentity{}, err
+	}
+	if !id.DirectoryIdentity.valid() {
+		return DirectoryIdentity{}, ErrDurableIdentity
+	}
+	return id.DirectoryIdentity, nil
+}
