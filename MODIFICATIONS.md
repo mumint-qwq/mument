@@ -15,6 +15,13 @@ Changes cover mobile browsing and mosaic layout, file operations and directory
 loading, device and folder preferences, diagnostics, related tests and generated
 API documentation, and mument branding/build documentation.
 
+The later 007-A through F work adds preview resource admission and coalescing,
+versioned image metadata, stable assets and controlled-move reuse, scoped idle
+generation, read-only reclamation trials, evidence-based orphan recovery,
+space/inode budgets and optional cold-result eviction, and verified full-content
+reuse after external or cross-mount moves. Defaults and validation limits are
+recorded in [007 status](docs/development/007/STATUS.md).
+
 | File | Declaration |
 | --- | --- |
 | `.github/PULL_REQUEST_TEMPLATE.md` | In-file comment |

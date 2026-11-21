@@ -18,6 +18,6 @@
 
 暂不提供 mument 的正式发行包或容器镜像，也未承诺开发文档中的构建步骤已经完整验证。
 
-## 当前开发分支
+## 开发进度
 
-本地开发基线已合入 007-A 至 E3（`aaaefeb`）。本分支为 007-F 外部移动与跨盘缓存复用的独立候选，默认关闭，尚未部署、推送或合并；生产按任务书记录为 007-B，本次未核实容器现场。实现、配置及实际验证边界见 [007-F 设计](docs/development/007f/DESIGN.md)和[运维说明](docs/development/007f/OPERATIONS.md)，验收通过项和未执行项见[验证记录](docs/development/007f/VALIDATION.md)。早期迁移来源见[迁移记录](docs/development/007-ab-migration.md)。
+007-A 至 F 的核心实现已整合到本地主线，包括预览资源保护、图片比例元数据、移动复用、后台生成以及缓存回收和空间预算。最终候选完成独立复审、隔离容器、手机操作后核验和 30 分钟混合回归；未覆盖组合与真实图库上线状态分别记录。详见[007 当前状态与验收范围](docs/development/007/STATUS.md)，迁入来源见[迁移记录](docs/development/007-ab-migration.md)。
