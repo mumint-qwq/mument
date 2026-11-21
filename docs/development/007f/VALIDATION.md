@@ -5,7 +5,8 @@
 ## 源码和环境
 
 - E3 基线：`aaaefebaf29084dc22fc5f0b03cbaeb73aafdb59`，tree `809188ef3ed75864ab5be078d388201ea944be0b`。
-- 功能冻结：`ea986fe712f51bb86478a93b10a98adb97ffde86`（主流程及故障回归），千图引用计数补充提交 `51fa6e89930350025d7d0f2ba2da3523052a9317`，tree `cac17921af41d1c9ed31f59b4534eaf2edb8aa98`。源先消失顺序补测 `5ecec4ec7b392b1370115bad74dc78579000bec1`，tree `1b7d21b2aa7e05fae538c4603d3df3a7fa583527`。后续交付文档提交不改变功能代码。
+- 当前修正功能冻结：`1e3952dd848182dcf7efa8822ee4771a338b2e75`，tree `2a5e66e7038b272bc0a11bf07444c08880393db4`；来源为对 `a0ab1e5` 的两项 P2 修正，详见末节。
+- 首轮功能/测试冻结记录：`ea986fe712f51bb86478a93b10a98adb97ffde86`（主流程及故障回归），千图引用计数补充提交 `51fa6e89930350025d7d0f2ba2da3523052a9317`，tree `cac17921af41d1c9ed31f59b4534eaf2edb8aa98`。源先消失顺序补测 `5ecec4ec7b392b1370115bad74dc78579000bec1`，tree `1b7d21b2aa7e05fae538c4603d3df3a7fa583527`。后续交付文档提交不改变功能代码。
 - 分支：`feature/007f-external-cache-reuse`；工作树：`custom/publish/worktrees/007f-external-cache-reuse`。
 - Linux `6.12.117+deb13-amd64` / amd64，Go `1.27.3`；测试产物使用 `CGO_ENABLED=0`、`-trimpath`，race 检查另用默认 CGO 工具链。
 - `GOMAXPROCS=2` 是 Go 运行参数，不能当作实际 2 CPU cgroup 限额证明。测试临时目录位于 tmpfs。真 EXDEV 使用两个独立私有 tmpfs 挂载；这些数据不能代表机械盘或生产磁盘吞吐。
@@ -29,11 +30,11 @@ bash scripts/development/verify-007f-mixed.sh /tmp/f-mixed-30m
 bash scripts/development/verify-007f-container.sh /tmp/f-host-evidence
 ```
 
-[证据总入口](../../../../../reviews/007f-execution-20261120/README.md)保存最终候选 manifest、脚本、二进制 SHA-256、源码提交与 tree、逐阶段退出码和原始日志。`candidate-ea986fe/` 和 `candidate-51fa6e8/` 是本轮检查；`candidate-a351c2a/` 包含真实持久索引回退；`mixed-30m/` 是同一生产逻辑的长时场景。`candidate-ffe6dcd/` 是前一轮；`run-1`、`run-2` 及较早 scale 目录保留开发过程，不能替代最终结果。各阶段实际结果以 `.exit` 和 `SUMMARY.json` 为准；未执行项没有伪造为零的退出码。
+[证据总入口](../../../../../reviews/007f-execution-20261120/README.md)保存最终候选 manifest、脚本、二进制 SHA-256、源码提交与 tree、逐阶段退出码和原始日志。`candidate-ea986fe/` 和 `candidate-51fa6e8/` 是首轮交付检查；`candidate-a351c2a/` 包含真实持久索引回退；`mixed-30m/` 是该轮源码的长时场景，未覆盖后来的变体选择/提示队列修正。`candidate-ffe6dcd/` 是前一轮；`run-1`、`run-2` 及较早 scale 目录保留开发过程，不能替代最终结果。修正候选的本轮记录在末节所链接的新目录。各阶段实际结果以 `.exit` 和 `SUMMARY.json` 为准；未执行项没有伪造为零的退出码。
 
 `verify-007f.sh` 分别保留专项、核心全包 race、后端全量、真实 EXDEV 和四阶段回退的结果；任何失败会让总入口非零。原有 E3 脚本独立复跑。真实 TCP/断线行为与进程内 handler 测试严格区分：本环境使用后者，不能据此宣称真实监听已通过。
 
-## F01–F20 索引
+## 首轮交付 F01–F20 索引（a0ab1e5）
 
 “通过”仅覆盖此处列出的断言；“部分”表示仍缺完整组合或性能证据，不能视为整个编号验收完成。专项原始日志见 host/targeted、supplement/targeted-race 和 late-checks；环境与性能入口另列。
 
@@ -97,3 +98,15 @@ F 聚合状态已补齐索引发现行、候选行/检查、已有证明复用�
 新增测试包括原 small/xlarge 发布选择、变体分散选择、有界候选页外的原资产优先、提示批事务/版本隔离、实际 EXDEV 写锁争用、256 队列满、部分失败及产品工作器的外部发现/跨盘提示/索引重发现。后台组合使用两种独立摘要，区分 8 MiB/s 核验等待与移动耗时，核对原发布键/epoch、两次实际目录刷新和 xlarge 新增解码 0。原独立评审材料保持原样。
 
 当前会话重新探测 IPv4/IPv6 回环仍为 operation not permitted，Docker socket 仍 permission denied。评审会话具备真实 TCP 能力，已对原候选在完整仓库归档中全量通过 31 个测试包；这是评审环境的结果，不声称修正候选或本会话真实 TCP 通过。修正候选的逐项退出码、来源、SHA 及未执行项见[修正证据入口](../../../../../reviews/007f-revision-20261121/README.md)。实际 Docker、资源限额、容器重建和手机体验仍待执行。
+
+
+本次固定源码的核心三包完整 race、专项、vet、过滤后 handler/settings、三轮同盘/跨挂载千文件、90 秒混合均通过。写锁下实际 EXDEV：12 项 F off=2.51ms / on=2.35ms；64 项 on=12.14ms、队列满=13.19ms。所有物理复制和源删除结果正确；这些是无 C 资产的移动对照，不能解释为移除原有 C 意图的 SQL 等待。
+
+产品工作器组合的移动时间分别为外部 rename <1ms、真实 EXDEV 2ms、满队列 3ms；后台等待及读回确认分别约 1256/1756/2255ms。每例源证明读 5279985 字节、目标读 3558453 字节，限速为 8 MiB/s，两个不同原图摘要，xlarge 新增解码均为 0。原资产线索可用时核对其存储键/epoch；丢失提示时按可用变体排序，允许选中同内容的另一历史资产。真实移动的部分失败也保留两次实际目录合并刷新。
+
+修正候选完整后端执行退出 1，失败为 TestBatchMoveClientDisconnectStillMaintains（handler transport 无真实端口）、TestOnlyOfficeDownloadClientRedirects 和 TestHTTPListenAddr（监听被禁止）。本轮 events 通过；之前的基线竞争只作历史记录。没有把此结果标为完整后端通过。
+
+
+冻结产物的 private-race 及四阶段持久索引回退全部退出 0。补充以四个新私有命名空间把同一目录 bind 到同一路径，不重置 index/ledger/cache；四阶段均通过，记录唯一挂载 ID 为 2148644521、2148644616、2148644711、2148644806。它验证了重新绑定及 unique-ID 取证入口，不是 Docker 或完整工作器重建验收。Docker 脚本仍未实际执行。
+
+同盘复跑入口现在也会在没有前端 embed 时建立并清理其自有 synthetic 占位，不依赖开发会话残留文件。已有真实 embed 会继续使用。固定二进制对应功能提交，最终文档/复跑准备改动没有改变 Go 源码；精确提交与 SHA 在修正证据 manifest。

@@ -5,7 +5,18 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p -- "$1";out=$(cd "$1" && pwd)
 go_cmd=${GO:-go};export GOMAXPROCS=2 TZ=Asia/Shanghai MUMENT_MOVE_HANDLER_TRANSPORT=1
-scratch=$(mktemp -d);trap 'rm -rf -- "$scratch"' EXIT
+scratch=$(mktemp -d)
+placeholder=''
+cleanup(){
+ if [[ -n $placeholder ]]; then rm -f -- "$placeholder"; rmdir "$root/backend/internal/web/embed" 2>/dev/null || true; fi
+ rm -rf -- "$scratch"
+}
+trap cleanup EXIT
+if ! compgen -G "$root/backend/internal/web/embed/*" >/dev/null; then
+ mkdir -p "$root/backend/internal/web/embed"
+ placeholder=$(mktemp "$root/backend/internal/web/embed/007f-scale-placeholder-XXXXXX")
+ printf 'Synthetic same-disk test embed only\n' > "$placeholder"
+fi
 mkdir "$scratch/e3"
 git -C "$root" archive aaaefebaf29084dc22fc5f0b03cbaeb73aafdb59 backend | tar -x -C "$scratch/e3"
 mkdir -p "$scratch/e3/backend/internal/web/embed"
