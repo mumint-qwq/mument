@@ -16,8 +16,10 @@ preview publication remain separate. F never serves a preview directly.
    hash equals the immutable proof. Sorted deduplicated physical stripes cover
    existing result keys; thumbnail byte integrity is checked outside the location
    gate. The location gate then protects a final guarded stat and `BindContent`
-   transaction. The target's empty token becomes A. Source references are not
-   deleted by F. Result key, epoch, generation time, use time and cooldown stay
+   transaction. The target must have its own durable equal full proof and a
+   `content_empty` marker proving that this token has never published. A token
+   emptied by eviction cannot be adopted. The eligible target token becomes A.
+   Source references are not deleted by F. Result key, epoch, generation time, use time and cooldown stay
    unchanged. A copy failure supplies no hint; a crash before hint is repaired
    by pagination. A crash during hashing supplies no proof.
 
@@ -28,9 +30,13 @@ preview publication remain separate. F never serves a preview directly.
    namespace, not an authorization identity or an original digest. Same-directory
    rename creates a new leaf reference; ancestor directory rename can preserve
    C's existing parent locator fast path. Old external missing references remain
-   protected because F cannot prove unlink. Lost notifications and process exit
+   protected because F cannot prove unlink. Administrator retention pages expose
+   bounded source-relative observations; missing paths remain unconfirmed.
+   Lost notifications and process exit
    are handled by periodic pagination; completed current observations avoid
-   duplicate hashing. A changed configured root is rejected by durable pins.
+   duplicate hashing. Work keys include the current C token, so an E3 writer
+   changing C without changing B cannot hide a new generation. A changed
+   configured root is rejected by durable pins.
 
 3. **Insufficient proof and normal demand.** If A's old source vanished before
    F ever read V1, hashing the target cannot establish what A originally decoded.

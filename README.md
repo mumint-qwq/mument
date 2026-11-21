@@ -20,4 +20,4 @@
 
 ## 当前开发分支
 
-本地开发基线已合入 007-A 至 E3（`aaaefeb`）。本分支为 007-F 外部移动与跨盘缓存复用的独立候选，默认关闭，尚未部署、推送或合并；生产按任务书记录为 007-B，本次未核实容器现场。实现、配置及实际验证边界见 [007-F 设计](docs/development/007f/DESIGN.md)和[运维说明](docs/development/007f/OPERATIONS.md)。早期迁移来源见[迁移记录](docs/development/007-ab-migration.md)。
+本地开发基线已合入 007-A 至 E3（`aaaefeb`）。本分支为 007-F 外部移动与跨盘缓存复用的独立候选，默认关闭，尚未部署、推送或合并；生产按任务书记录为 007-B，本次未核实容器现场。实现、配置及实际验证边界见 [007-F 设计](docs/development/007f/DESIGN.md)和[运维说明](docs/development/007f/OPERATIONS.md)，验收通过项和未执行项见[验证记录](docs/development/007f/VALIDATION.md)。早期迁移来源见[迁移记录](docs/development/007-ab-migration.md)。

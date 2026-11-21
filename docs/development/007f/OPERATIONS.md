@@ -45,7 +45,7 @@ First access can race ahead of proof coverage; it follows normal C/A behavior.
 F keeps a winning foreground result. After a mismatch or a missing usable
 publication, the exact target proof can be reused on a later pass without
 rereading the original. Resource/offline deferrals do not consume the three
-per-version I/O failure attempts. Work is coalesced by scope/path/index version;
+per-version I/O failure attempts. Work is coalesced by scope/path/index version/current C token;
 old path state expires after 30 days in 32-row maintenance batches. Copy hints
 are capped at 4096, processed in pages of 16, and expire after a day. Lost hints
 are rediscovered through index pagination. Proofs are retained per asset for
