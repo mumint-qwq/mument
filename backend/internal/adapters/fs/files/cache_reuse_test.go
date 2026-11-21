@@ -103,6 +103,7 @@ func TestContentRealEXDEVCopyHint(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, hints, 1)
 	require.True(t, hints[0].EXDEV)
+	require.Eventually(t, func() bool { _, e := os.Stat(source); return os.IsNotExist(e) }, time.Second, time.Millisecond) // Source-first discovery order.
 	targetInfo := sourceInfo
 	targetInfo.Source = "reuse-b"
 	targetInfo.RealPath = target
